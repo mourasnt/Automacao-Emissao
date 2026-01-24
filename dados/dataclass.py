@@ -48,7 +48,9 @@ class Carga:
 
             # --- Lógica para Frete ---
             frete_original = row["Tabela Frete"]
+            print(f"[DEBUG] Processando N° Carga '{row['N° Carga']}': Valor original do frete: '{frete_original}'")
             frete = _limpar_e_converter_valor(frete_original)
+            print(f"[DEBUG] Processando N° Carga '{row['N° Carga']}': Valor convertido do frete: '{frete}'")
 
             if frete is None: # Se a conversão falhou
                 if acao_valor_invalido == 'pular_linha':
