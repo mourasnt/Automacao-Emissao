@@ -64,7 +64,7 @@ def executar_fluxo(nome_fluxo: str, funcao_fluxo, config: Dict[str, Any]): # <--
         try:
             logger.info(f"Iniciando thread e navegador para o worker: '{nome_fluxo}'")
             
-            browser = playwright.firefox.launch(headless=False)
+            browser = playwright.firefox.launch(headless=True)
             context = browser.new_context()
             page = context.new_page()
             page.goto("https://portal.emiteai.com.br/#/login")
