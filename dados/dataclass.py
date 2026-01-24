@@ -90,6 +90,7 @@ class Carga:
             )
         except KeyError as e:
             print(f"[ERROR] Coluna não encontrada na linha com N° Carga '{row.get('N° Carga', 'N/A')}': {e}. Pulando linha.")
+            print(row)
             return None
         except Exception as e:
             print(f"[ERROR] Erro inesperado ao processar linha com N° Carga '{row.get('N° Carga', 'N/A')}': {e}. Pulando linha.")

@@ -54,28 +54,43 @@ def obter_dados_para_poller(config):
         headers = worksheet.row_values(header_row_num)
         header_map = {h: i + 1 for i, h in enumerate(headers) if h}
 
+        # Colunas mínimas para controle de filas
         required_cols = ['Status de emissão', 'N° Carga', 'ID 3ZX', 'Status']
-        for col in required_cols:
-            if col not in header_map:
-                logger.critical(f"Coluna obrigatória '{col}' não encontrada no cabeçalho.")
-                return pd.DataFrame()
+        missing_required = [col for col in required_cols if col not in header_map]
+        if missing_required:
+            logger.critical(f"Colunas obrigatórias ausentes no cabeçalho: {missing_required}")
+            return pd.DataFrame()
 
-        # Busca apenas as colunas necessárias
-        cols_values = []
+        # Colunas adicionais necessárias pelos workers (ex.: conferência usa frete/placas)
+        optional_cols = [
+            'Tabela Frete', 'Pedágio', 'Placa', 'Placa 2',
+            'Origem', 'Destino', 'Motorista', 'CTE', 'MDFe'
+        ]
+        missing_optional = [col for col in optional_cols if col not in header_map]
+        if missing_optional:
+            logger.warning(f"Colunas opcionais não encontradas: {missing_optional}. Valores serão preenchidos vazios.")
+
+        cols_to_fetch = required_cols + optional_cols
+
+        # Busca as colunas solicitadas; se não existir, preenche com lista vazia
+        cols_values = {}
         max_len = 0
-        for col in required_cols:
-            col_idx = header_map[col]
-            values = worksheet.col_values(col_idx)
-            # Remove header
-            values = values[header_row_index + 1:]
-            cols_values.append(values)
+        for col in cols_to_fetch:
+            if col in header_map:
+                col_idx = header_map[col]
+                values = worksheet.col_values(col_idx)
+                values = values[header_row_index + 1:]  # Remove cabeçalho
+            else:
+                values = []
+
+            cols_values[col] = values
             max_len = max(max_len, len(values))
 
         # Normaliza tamanhos e monta lista de linhas
         rows = []
         for i in range(max_len):
             row = {}
-            for col_name, col_list in zip(required_cols, cols_values):
+            for col_name, col_list in cols_values.items():
                 row[col_name] = col_list[i] if i < len(col_list) else ''
             row['original_row_number'] = i + header_row_num + 1
             rows.append(row)
