@@ -1,0 +1,80 @@
+version: "3.8"
+
+# --------------------------------------------------------------------
+# DEFINIÇÃO "BASE" DA APLICAÇÃO (para não repetir código)
+# --------------------------------------------------------------------
+x-app-base: &app-base
+  build: .
+  image: automacao-emiteai:1.0
+  restart: unless-stopped
+  depends_on:
+    redis:
+      condition: service_healthy
+  volumes:
+    - ./logs:/app/logs
+    - ./utils/config.json:/app/utils/config.json
+    - ./dados/credentials.json:/app/dados/credentials.json
+
+  environment:
+    - RPA_USUARIO=${RPA_USUARIO}
+    - RPA_SENHA=${RPA_SENHA}
+    - GOOGLE_APPLICATION_CREDENTIALS=/app/dados/credentials.json
+
+  networks:
+    - rede-redis
+
+services:
+  # --------------------------------------------------------------------
+  # SERVIÇO 1: O POLLER (Produtor - Lê Planilha)
+  # --------------------------------------------------------------------
+  poller:
+    <<: *app-base 
+    container_name: poller
+    command: python poller.py
+
+  # --------------------------------------------------------------------
+  # SERVIÇO 2: O WRITER (Coletor - Escreve na Planilha)
+  # --------------------------------------------------------------------
+  writer:
+    <<: *app-base 
+    container_name: writer
+    command: python writer.py
+
+  # --------------------------------------------------------------------
+  # SERVIÇO 3: OS WORKERS DE RPA (Consumidores - Rodam Playwright)
+  # --------------------------------------------------------------------
+  rpa-workers:
+    <<: *app-base 
+    container_name: rpa_workers
+    command: python main.py
+    
+    shm_size: '2gb' 
+
+  # --------------------------------------------------------------------
+  # SERVIÇO 4: O REDIS
+  # --------------------------------------------------------------------
+  redis:
+    image: redis:7.2-alpine
+    container_name: redis-emiteai
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
+    networks:
+      - rede-redis
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+volumes:
+  redis_data:
+    driver: local
+# --------------------------------------------------------------------
+# REDE
+# --------------------------------------------------------------------
+networks:
+  rede-redis:
+    driver: bridge
+

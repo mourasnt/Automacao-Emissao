@@ -1,0 +1,41 @@
+{
+  "main_sheet": {
+    "spreadsheet_id": "15LRzVS0UIdvpDD9HKzv5Osl9a8ibVOHbTLKNGLQji9I",
+    "worksheet_name": "SHOPEE",
+    "header_row_number": 3
+  },
+  "error_log_sheet": {
+    "spreadsheet_id": "1yAIT7Aj6OTGY7jhtm4wXx-FZrPYmT7d_sG1UdvQjhoI",
+    "worksheet_name": "Página1"
+  },
+  "creds_path": "dados/credentials.json",
+
+  "redis_settings": {
+    "db": 3,
+    "host": "redis-emiteai",
+    "port": 6379,
+    "results_queue": "fila:resultados",
+    "conference_queue": "fila:conferencia",
+    "emission_queue": "fila:emissao",
+    "control_set": "jobs_em_progresso"
+  },
+
+  "writer_settings": {
+    "batch_max_size_cells": 200,
+    "batch_max_size_rows": 50,
+    "batch_max_wait_seconds": 5
+  },
+
+  "poller_settings": {
+    "poll_interval_seconds": 300,
+    "statusConferir": [
+      "ENTREGA FINALIZADA",
+      "AGUARDANDO DESCARGA",
+      "EM TRANSITO"
+    ]
+  },
+  
+  "default_frete": 100,
+  "default_pedagio": 0,
+  "acao_valor_invalido": "preencher"
+}

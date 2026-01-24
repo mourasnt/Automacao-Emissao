@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Logs
+logs/
+
+dados/credentials.json
+dados/auth.json
+
+# Editor
+.vscode/
+.idea/
