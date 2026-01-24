@@ -163,7 +163,7 @@ def fluxo_conferencia_worker(page: Page, config: dict):
                     enviar_job_append_erro(r, config, numero_lt, campo_falha, valor_falha)
                 
                 elif resultado_rpa["status"] == "falha_rpa":
-                    motivo_falha = resultado_rpa["motivo"]
+                    motivo_falha = resultado_rpa.get("motivo") or f"{resultado_rpa.get('campo', 'Erro')}: {resultado_rpa.get('valor', 'Desconhecido')}"
                     logger.error(f"[Worker Conferência] LT {numero_lt} (Linha {linha_num}) FALHOU (RPA): {motivo_falha}")
 
             elif status_emiteai == "Carga Finalizada" or status_emiteai == "Aguardando Emissão":

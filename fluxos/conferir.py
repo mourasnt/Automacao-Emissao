@@ -78,8 +78,12 @@ def conferir_lt(page: Page, carga: Carga) -> dict:
             expect(page.get_by_role("textbox", name="Placa principal")).to_be_hidden(timeout=5000)
         except Exception:
             page.reload(wait_until="networkidle")
-            
-        return {"status": tipo_erro, "campo": campo, "valor": valor}
+        
+        resultado = {"status": tipo_erro, "campo": campo, "valor": valor}
+        # Adiciona 'motivo' para compatibilidade com o worker
+        if tipo_erro == "falha_rpa":
+            resultado["motivo"] = f"{campo}: {valor}"
+        return resultado
 
     # Bloco try principal para o RPA
     try:
@@ -142,6 +146,22 @@ def conferir_lt(page: Page, carga: Carga) -> dict:
         except (TimeoutError, ValueError) as e:
             return cancelar_e_sair(campo="Expedidor", valor=carga.origem)
 
+        # Tomador
+        # Este 'try' agora captura o 'raise ValueError' se as 2 tentativas falharem
+        try:
+            tomador_input = page.get_by_role("textbox", name="Tomador")
+            tomador_input.fill("")
+            tomador_input.type(carga.origem, delay=50)
+            if not escolher_opcao_mais_parecida(page, carga.origem): # Tentativa 1
+                logger.warning(f"[Worker Conferência] Primeira tentativa de 'Tomador' falhou. Tentando nome limpo.")
+                tomador_input.fill("")
+                nome_limpo = carga.origem.rsplit("_")[-1].rsplit("-")[-1].strip()
+                tomador_input.type(nome_limpo, delay=50)
+                if not escolher_opcao_mais_parecida(page, nome_limpo): # Tentativa 2
+                    raise ValueError("Opção de tomador não encontrada após 2 tentativas.")
+        except (TimeoutError, ValueError) as e:
+            return cancelar_e_sair(campo="Tomador", valor=carga.origem)
+
         # Recebedor
         try:
             recebedor_input = page.get_by_role("textbox", name="Recebedor")
@@ -168,8 +188,11 @@ def conferir_lt(page: Page, carga: Carga) -> dict:
             return cancelar_e_sair(campo="Motorista", valor=carga.motorista)
         
         # --- (Restante do preenchimento do formulário) ---
-        page.locator(".MuiInputBase-root.MuiOutlinedInput-root.Mui-error > .MuiSelect-root").click() 
+        page.locator(".MuiInputBase-root.MuiOutlinedInput-root.Mui-error > .MuiSelect-root").first.click() 
         page.get_by_role("option", name="Redespacho Intermediário").click()
+
+        page.locator("div:nth-child(2) > .MuiFormControl-root > .MuiInputBase-root > .MuiSelect-root").click()
+        page.get_by_role("option", name="Remetente").click()
         
         total = carga.frete + carga.pedagio
         valor_ciot = total - 100
@@ -204,7 +227,9 @@ def conferir_lt(page: Page, carga: Carga) -> dict:
 
         # ETAPA 5: Finalização
         page.get_by_role("button", name="EmiteAí").click()
+        time.sleep(2)
         page.get_by_role("button", name="Sim").click()
+        time.sleep(5) # Espera o processamento
         
         logger.success(f"[Worker Conferência] Conferência da LT {carga.numero_lt} concluída com sucesso (RPA).")
         return {"status": "sucesso"}
