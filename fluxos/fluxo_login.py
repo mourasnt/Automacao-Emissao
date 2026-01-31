@@ -1,5 +1,15 @@
 from playwright.sync_api import Page, TimeoutError
 from loguru import logger
+import json
+import os
+
+# Carrega configurações de timeout
+config_path = os.path.join(os.path.dirname(__file__), "..", "utils", "config.json")
+with open(config_path, "r", encoding="utf-8") as f:
+    config = json.load(f)
+
+LOGIN_NAVIGATION_TIMEOUT = config.get("timeout_settings", {}).get("login_navigation_ms", 45000)
+PAGE_RELOAD_TIMEOUT = config.get("timeout_settings", {}).get("page_reload_ms", 45000)
 
 def fluxo_login(page: Page, usuario: str, senha: str, max_tentativas: int = 3, output_path: str = "dados/auth.json") -> bool:
 
@@ -23,7 +33,7 @@ def fluxo_login(page: Page, usuario: str, senha: str, max_tentativas: int = 3, o
             page.get_by_role("button", name="Continuar").click()
             page.get_by_placeholder("******").fill(senha)
             
-            with page.expect_navigation(timeout=15000): # Espera por até 15 segundos
+            with page.expect_navigation(timeout=LOGIN_NAVIGATION_TIMEOUT): # Espera configurável (padrão 45s)
                 page.get_by_role("button", name="Entrar").click()
 
             # Se o código chegou aqui, a navegação ocorreu com sucesso.
@@ -41,13 +51,28 @@ def fluxo_login(page: Page, usuario: str, senha: str, max_tentativas: int = 3, o
             # Se não for erro de senha, pode ser lentidão. Recarrega para a próxima tentativa.
             if tentativa < max_tentativas:
                 logger.debug("Recarregando a página para a próxima tentativa...")
-                page.reload()
-                page.wait_for_load_state('domcontentloaded')
+                try:
+                    page.reload(timeout=PAGE_RELOAD_TIMEOUT, wait_until="domcontentloaded")
+                except TimeoutError as reload_err:
+                    logger.error(f"Timeout ao recarregar página: {reload_err}")
+                    # Tenta navegar diretamente para a página de login
+                    try:
+                        page.goto("https://portal.emiteai.com.br/#/login", timeout=PAGE_RELOAD_TIMEOUT)
+                    except Exception as goto_err:
+                        logger.error(f"Falha ao navegar para login: {goto_err}")
 
         except Exception as e:
             logger.error(f"Erro inesperado na tentativa {tentativa}: {e}")
             if tentativa < max_tentativas:
-                 page.reload()
+                try:
+                    page.reload(timeout=PAGE_RELOAD_TIMEOUT, wait_until="domcontentloaded")
+                except Exception as reload_err:
+                    logger.error(f"Falha ao recarregar página após erro: {reload_err}")
+                    # Tenta navegar diretamente para a página de login
+                    try:
+                        page.goto("https://portal.emiteai.com.br/#/login", timeout=PAGE_RELOAD_TIMEOUT)
+                    except Exception as goto_err:
+                        logger.error(f"Falha crítica ao navegar para login: {goto_err}")
 
     logger.critical(f"Login falhou após {max_tentativas} tentativas.")
     return False

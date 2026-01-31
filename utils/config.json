@@ -34,6 +34,21 @@
       "EM TRANSITO"
     ]
   },
+
+  "timeout_settings": {
+    "login_navigation_ms": 45000,
+    "page_reload_ms": 45000,
+    "element_wait_ms": 30000,
+    "network_idle_ms": 30000,
+    "default_operation_ms": 30000
+  },
+
+  "worker_retry_settings": {
+    "login_max_attempts": 3,
+    "login_retry_delay_seconds": 30,
+    "operation_max_attempts": 3,
+    "operation_retry_delay_seconds": 5
+  },
   
   "default_frete": 100,
   "default_pedagio": 0,

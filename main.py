@@ -2,6 +2,7 @@ import os
 import threading
 import time
 import sys
+import json
 from playwright.sync_api import sync_playwright # <--- CORREÇÃO: 'Browser' removido
 from loguru import logger
 from typing import Dict, Any
@@ -69,12 +70,29 @@ def executar_fluxo(nome_fluxo: str, funcao_fluxo, config: Dict[str, Any]): # <--
             page = context.new_page()
             page.goto("https://portal.emiteai.com.br/#/login")
 
-            login_ok = fluxo_login(page=page, usuario=USUARIO, senha=SENHA)
-            if not login_ok:
-                logger.critical(f"Login falhou para o worker '{nome_fluxo}'. A thread será encerrada.")
-                return 
+            # Tenta login com retry e backoff exponencial
+            login_ok = False
+            for login_attempt in range(1, 4):  # 3 tentativas
+                logger.info(f"Tentativa de login {login_attempt}/3 para worker '{nome_fluxo}'...")
+                login_ok = fluxo_login(page=page, usuario=USUARIO, senha=SENHA)
+                if login_ok:
+                    logger.success(f"Login realizado com sucesso para '{nome_fluxo}' na tentativa {login_attempt}.")
+                    break
+                
+                logger.warning(f"Login falhou na tentativa {login_attempt}/3 para '{nome_fluxo}'.")
+                if login_attempt < 3:
+                    wait_time = 30 * login_attempt  # 30s, 60s
+                    logger.info(f"Aguardando {wait_time}s antes da próxima tentativa...")
+                    time.sleep(wait_time)
+                    # Recarrega a página para tentar novamente
+                    try:
+                        page.goto("https://portal.emiteai.com.br/#/login", timeout=45000)
+                    except Exception as nav_err:
+                        logger.error(f"Erro ao navegar para login na tentativa {login_attempt + 1}: {nav_err}")
             
-            logger.success(f"Login realizado com sucesso para '{nome_fluxo}'. Executando loop do worker.")
+            if not login_ok:
+                logger.critical(f"Todas as tentativas de login falharam para o worker '{nome_fluxo}'. A thread será encerrada.")
+                return
             
             funcao_fluxo(page, config) 
             

@@ -2,12 +2,20 @@ import redis
 import json
 import time
 import datetime
+import os
 from loguru import logger
 from playwright.sync_api import Page
 from dados.dataclass import Carga
 from fluxos.conferir import conferir_lt
 from utils.fluxo_utils import obter_status_lt, garantir_pagina_consulta
 from utils.filtros import filtro_cargas 
+
+# Carrega configurações de timeout
+config_path = os.path.join(os.path.dirname(__file__), "..", "utils", "config.json")
+with open(config_path, "r", encoding="utf-8") as f:
+    timeout_config = json.load(f)
+
+PAGE_RELOAD_TIMEOUT = timeout_config.get("timeout_settings", {}).get("page_reload_ms", 45000) 
 
 
 # --- FUNÇÕES HELPER DE ENVIO DE RESULTADO ---
@@ -104,7 +112,17 @@ def fluxo_conferencia_worker(page: Page, config: dict):
 
         # 3. PROCESSAR O JOB
         try:
-            page.reload(wait_until="domcontentloaded", timeout=20000)
+            try:
+                page.reload(wait_until="domcontentloaded", timeout=PAGE_RELOAD_TIMEOUT)
+            except Exception as reload_err:
+                logger.error(f"[Worker Conferência] Falha ao recarregar página: {reload_err}")
+                # Tenta navegar para a página conhecida
+                try:
+                    page.goto(URL_CONSULTA, timeout=PAGE_RELOAD_TIMEOUT)
+                except Exception as goto_err:
+                    logger.error(f"[Worker Conferência] Falha ao navegar para consulta: {goto_err}")
+                    continue
+            
             carga = Carga.from_row(linha_data)
             data_agora = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             

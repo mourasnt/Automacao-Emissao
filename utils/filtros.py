@@ -3,6 +3,15 @@ import datetime
 import re
 from loguru import logger
 import time
+import json
+import os
+
+# Carrega configurações de timeout
+config_path = os.path.join(os.path.dirname(__file__), "config.json")
+with open(config_path, "r", encoding="utf-8") as f:
+    config = json.load(f)
+
+PAGE_RELOAD_TIMEOUT = config.get("timeout_settings", {}).get("page_reload_ms", 45000)
 
 
 def filtro_cargas(page: Page, numero_lt: str):
@@ -45,13 +54,19 @@ def filtro_cargas(page: Page, numero_lt: str):
         detalhe_erro = str(e).split('\n')[0]
         logger.error(f"[Worker Conferência] [LT {numero_lt}] Timeout ao pesquisar: {detalhe_erro}")
         logger.debug(f"[Worker Conferência] [LT {numero_lt}] URL no momento do erro: {page.url}")
-        page.reload()
-        logger.debug(f"[Worker Conferência] [LT {numero_lt}] URL após reload: {page.url}")
+        try:
+            page.reload(timeout=PAGE_RELOAD_TIMEOUT, wait_until="domcontentloaded")
+            logger.debug(f"[Worker Conferência] [LT {numero_lt}] URL após reload: {page.url}")
+        except Exception as reload_err:
+            logger.error(f"[Worker Conferência] [LT {numero_lt}] Falha ao recarregar: {reload_err}")
         raise
 
     except Exception as e:
         logger.critical(f"[Worker Conferência] [LT {numero_lt}] Erro inesperado ao pesquisar: {e}")
-        page.reload()
+        try:
+            page.reload(timeout=PAGE_RELOAD_TIMEOUT, wait_until="domcontentloaded")
+        except Exception as reload_err:
+            logger.error(f"[Worker Conferência] [LT {numero_lt}] Falha ao recarregar: {reload_err}")
         raise
 
 def filtro_cards(page: Page, numero_lt: str):
@@ -116,10 +131,16 @@ def filtro_cards(page: Page, numero_lt: str):
     except TimeoutError as e:
         detalhe_erro = str(e).split('\n')[0]
         logger.error(f"[Worker Emissão] [LT {numero_lt}] Timeout na pesquisa de cards: {detalhe_erro}")
-        page.reload()
+        try:
+            page.reload(timeout=PAGE_RELOAD_TIMEOUT, wait_until="domcontentloaded")
+        except Exception as reload_err:
+            logger.error(f"[Worker Emissão] [LT {numero_lt}] Falha ao recarregar: {reload_err}")
         raise
 
     except Exception as e:
         logger.critical(f"[Worker Emissão] [LT {numero_lt}] Erro inesperado na pesquisa de cards: {e}")
-        page.reload()
+        try:
+            page.reload(timeout=PAGE_RELOAD_TIMEOUT, wait_until="domcontentloaded")
+        except Exception as reload_err:
+            logger.error(f"[Worker Emissão] [LT {numero_lt}] Falha ao recarregar: {reload_err}")
         raise

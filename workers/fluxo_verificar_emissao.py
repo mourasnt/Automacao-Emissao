@@ -3,6 +3,7 @@ import redis
 import json
 import time
 import datetime
+import os
 from loguru import logger
 from playwright.sync_api import Page
 from utils.fluxo_utils import goto_cards, analisar_status_emissao, identificar_tipo_card
@@ -10,6 +11,13 @@ from utils.filtros import filtro_cards
 from fluxos.revisar import revisar_lt
 from fluxos.preencher_cte import preencher_cte
 from fluxos.preencher_mdfe import preencher_mdfe
+
+# Carrega configurações de timeout
+config_path = os.path.join(os.path.dirname(__file__), "..", "utils", "config.json")
+with open(config_path, "r", encoding="utf-8") as f:
+    timeout_config = json.load(f)
+
+PAGE_RELOAD_TIMEOUT = timeout_config.get("timeout_settings", {}).get("page_reload_ms", 45000)
 
 
 def enviar_job_update(r_client: redis.Redis, config: dict, row: int, colunas: list, valores: list):
@@ -226,7 +234,15 @@ def fluxo_verificar_emissao_worker(page: Page, config: dict):
         except Exception as e:
             logger.exception(f"[Worker Emissão] Erro ao processar LT {numero_lt} (Linha {linha_num}). Tentando recarregar a página e continuar.")
             
-            page.reload() # Tenta recarregar a página para o próximo job
+            try:
+                page.reload(timeout=PAGE_RELOAD_TIMEOUT, wait_until="domcontentloaded")
+            except Exception as reload_err:
+                logger.error(f"[Worker Emissão] Falha ao recarregar página: {reload_err}")
+                # Tenta navegar para a página de cards como fallback
+                try:
+                    page.goto("https://portal.emiteai.com.br/#/emissor", timeout=PAGE_RELOAD_TIMEOUT)
+                except Exception as goto_err:
+                    logger.error(f"[Worker Emissão] Falha crítica ao navegar: {goto_err}")
             continue
         finally:
             try:
