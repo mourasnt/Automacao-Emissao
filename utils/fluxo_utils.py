@@ -231,6 +231,7 @@ def analisar_status_emissao(page: Page, numero_lt: str) -> dict | None:
 def obter_status_lt(page: Page, numero_lt: str) -> str:
     """Procura a LT na tabela e retorna o Status."""
     try:
+        page.sleep(5000)
         linha_alvo = page.locator("table tbody tr", has_text=numero_lt).first
         
         if linha_alvo.count() == 0:
