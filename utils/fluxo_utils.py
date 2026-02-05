@@ -463,14 +463,16 @@ class ThreadPoolManager:
         Calcula quantas threads são necessárias para o tipo de job.
         
         Fórmula: ceil(jobs_pendentes / jobs_per_thread_ratio)
-        Mínimo: min_threads_per_type (configurável em thread_pool_settings)
+        Mínimo: min_threads_per_type (configurável em thread_pool_settings) - SEMPRE respeitado
         Máximo: max_threads_per_type
         """
         fila_key = f"fila:{tipo_job}"
         try:
             jobs_pendentes = self.redis_client.llen(fila_key)
+            
             if jobs_pendentes == 0:
-                return 0
+                # Mesmo sem jobs, mantém o mínimo de threads configurado
+                return self.min_threads_per_type
             
             threads_necessarias = ceil(jobs_pendentes / self.jobs_per_thread_ratio)
             threads_necessarias = max(threads_necessarias, self.min_threads_per_type)
@@ -479,7 +481,7 @@ class ThreadPoolManager:
             return threads_necessarias
         except Exception as e:
             logger.error(f"Erro ao contar jobs em fila:{tipo_job}: {e}")
-            return 0
+            return self.min_threads_per_type  # Em caso de erro, retorna o mínimo
     
     def _marcar_thread_para_morte(self, tipo_job: str, thread: threading.Thread):
         """
@@ -694,6 +696,8 @@ class ThreadPoolManager:
         """
         Monitora threads de workers e recria as que morreram inesperadamente.
         Também verifica kill signals do Watchdog e cria threads de reposição.
+        
+        IMPORTANTE: Threads mortas por downscaling intencional NÃO são recriadas.
         """
         logger.info("Monitorando threads de workers...")
         
@@ -703,17 +707,32 @@ class ThreadPoolManager:
             
             with self.lock:
                 for tipo_job in ["conferencia", "emissao"]:
-                    # Filtra threads mortas
-                    threads_vivas = [t for t in self.threads[tipo_job] if t.is_alive()]
-                    threads_mortas = len(self.threads[tipo_job]) - len(threads_vivas)
+                    # Separar threads vivas de mortas
+                    threads_vivas = []
+                    threads_mortas_inesperadamente = []
                     
-                    if threads_mortas > 0:
+                    for t in self.threads[tipo_job]:
+                        if t.is_alive():
+                            threads_vivas.append(t)
+                        else:
+                            # Thread morreu - verificar se foi intencional (downscaling)
+                            if t in self.__threads_marked_to_die[tipo_job]:
+                                # Morte intencional (downscaling) - remover do registro e NÃO recriar
+                                self.__threads_marked_to_die[tipo_job].discard(t)
+                                logger.info(
+                                    f"[DOWNSCALE] Thread '{t.name}' encerrada gracefully por downscaling."
+                                )
+                            else:
+                                # Morte inesperada (crash) - precisa ser recriada
+                                threads_mortas_inesperadamente.append(t)
+                    
+                    # Recriar apenas threads que morreram inesperadamente
+                    if threads_mortas_inesperadamente:
                         logger.warning(
-                            f"[RECUPERAR] {tipo_job}: {threads_mortas} thread(s) morreu(morreram)! "
+                            f"[RECUPERAR] {tipo_job}: {len(threads_mortas_inesperadamente)} thread(s) morreu(morreram) inesperadamente! "
                             f"Recriando..."
                         )
-                        # Recriar threads mortas imediatamente
-                        for _ in range(threads_mortas):
+                        for thread_morta in threads_mortas_inesperadamente:
                             try:
                                 nome_worker = f"{tipo_job}_worker_recovery_{int(time.time())}"
                                 nova_thread = self.criar_thread_worker(tipo_job, nome_worker)
