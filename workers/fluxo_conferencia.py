@@ -86,6 +86,19 @@ def fluxo_conferencia_worker(page: Page, config: dict):
     # Obter watchdog do config (se disponível)
     watchdog = config.get('watchdog', None)
     
+    # Obter pool manager do config (se disponível) para verificar downscaling
+    pool_manager = config.get('thread_pool_manager', None)
+    
+    # Função helper para verificar se a thread deve morrer (downscaling)
+    def verificar_deve_morrer() -> bool:
+        """Verifica se esta thread foi marcada para morte por downscaling."""
+        try:
+            if pool_manager:
+                return pool_manager.thread_deve_morrer("conferencia")
+        except Exception as e:
+            logger.error(f"[Worker Conferência] Erro ao verificar downscaling: {e}")
+        return False
+    
     # Função helper para verificar kill signal
     def verificar_kill_signal(job_id_atual: str) -> bool:
         """Verifica se este job foi sinalizado para morrer pelo watchdog."""
@@ -111,7 +124,12 @@ def fluxo_conferencia_worker(page: Page, config: dict):
     max_tentativas_reconexao = 3
     job_atual = None  # Track current job for kill signal check
     
-    while True: 
+    while True:
+        # Verificar se thread deve morrer por downscaling
+        if verificar_deve_morrer():
+            logger.warning(f"[Worker Conferência] 💀 Downscaling detectado. Thread será encerrada.")
+            break
+        
         # Verificar kill signal para o job atual (se houver)
         if job_atual and verificar_kill_signal(job_atual):
             logger.critical(f"[Worker Conferência] Encerrando thread por kill signal do Watchdog!")

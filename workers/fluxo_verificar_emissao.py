@@ -57,6 +57,19 @@ def fluxo_verificar_emissao_worker(page: Page, config: dict):
     # Extrair watchdog da configuração
     watchdog = config.get('watchdog', None)
     
+    # Obter pool manager do config (se disponível) para verificar downscaling
+    pool_manager = config.get('thread_pool_manager', None)
+    
+    # Função helper para verificar se a thread deve morrer (downscaling)
+    def verificar_deve_morrer() -> bool:
+        """Verifica se esta thread foi marcada para morte por downscaling."""
+        try:
+            if pool_manager:
+                return pool_manager.thread_deve_morrer("emissao")
+        except Exception as e:
+            logger.error(f"[Worker Emissão] Erro ao verificar downscaling: {e}")
+        return False
+    
     try:
         from utils.redis_client import get_redis
         r = get_redis(host=r_host, port=r_port, db=r_db)
@@ -89,6 +102,11 @@ def fluxo_verificar_emissao_worker(page: Page, config: dict):
 
     while True:
         numero_lt = None  # Para usar no finally block
+        
+        # Verificar se thread deve morrer por downscaling
+        if verificar_deve_morrer():
+            logger.warning(f"[Worker Emissão] 💀 Downscaling detectado. Thread será encerrada.")
+            break
         
         # Verificar kill signal para o job atual (se houver)
         if job_atual and verificar_kill_signal(job_atual):

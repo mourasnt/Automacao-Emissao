@@ -49,6 +49,13 @@
     "operation_max_attempts": 3,
     "operation_retry_delay_seconds": 5
   },
+
+  "thread_pool_settings": {
+    "min_threads_per_type": 1,
+    "max_threads_per_type": 10,
+    "jobs_per_thread_ratio": 50,
+    "rebalance_interval_seconds": 60
+  },
   
   "default_frete": 100,
   "default_pedagio": 0,

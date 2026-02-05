@@ -177,6 +177,9 @@ def main():
             max_total_threads=20,  # Máximo 20 threads no total
         )
         
+        # Adiciona pool_manager ao config para os workers acessarem
+        config['thread_pool_manager'] = pool_manager
+        
         # Inicia o gerenciador
         pool_manager.iniciar()
         

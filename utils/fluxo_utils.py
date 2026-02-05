@@ -433,11 +433,23 @@ class ThreadPoolManager:
         self.max_threads_per_type = max_threads_per_type
         self.max_total_threads = max_total_threads
         
+        # Carregar configurações de thread pool do config.json
+        thread_pool_cfg = config.get("thread_pool_settings", {})
+        self.min_threads_per_type = thread_pool_cfg.get("min_threads_per_type", 1)
+        self.jobs_per_thread_ratio = thread_pool_cfg.get("jobs_per_thread_ratio", 50)
+        
         # Dicionário para rastrear threads ativas por tipo
         # {"conferencia": [t1, t2, ...], "emissao": [t3, t4, ...]}
         self.threads: Dict[str, list] = {
             "conferencia": [],
             "emissao": []
+        }
+        
+        # Dicionário para rastrear threads marcadas para morte por tipo
+        # {"conferencia": set([t1, t2]), "emissao": set([t3])}
+        self.__threads_marked_to_die: Dict[str, set] = {
+            "conferencia": set(),
+            "emissao": set()
         }
         
         # Lock para operações thread-safe
@@ -450,8 +462,8 @@ class ThreadPoolManager:
         """
         Calcula quantas threads são necessárias para o tipo de job.
         
-        Fórmula: ceil(jobs_pendentes / 50)
-        Mínimo: 1 thread se houver jobs, 0 se nenhum job
+        Fórmula: ceil(jobs_pendentes / jobs_per_thread_ratio)
+        Mínimo: min_threads_per_type (configurável em thread_pool_settings)
         Máximo: max_threads_per_type
         """
         fila_key = f"fila:{tipo_job}"
@@ -460,13 +472,89 @@ class ThreadPoolManager:
             if jobs_pendentes == 0:
                 return 0
             
-            threads_necessarias = ceil(jobs_pendentes / 50)
+            threads_necessarias = ceil(jobs_pendentes / self.jobs_per_thread_ratio)
+            threads_necessarias = max(threads_necessarias, self.min_threads_per_type)
             threads_necessarias = min(threads_necessarias, self.max_threads_per_type)
             
             return threads_necessarias
         except Exception as e:
             logger.error(f"Erro ao contar jobs em fila:{tipo_job}: {e}")
             return 0
+    
+    def _marcar_thread_para_morte(self, tipo_job: str, thread: threading.Thread):
+        """
+        Marca uma thread para ser encerrada graciosamente após terminar seu job atual.
+        
+        A thread receberá um sinal via estrutura compartilhada e encerrará seu loop
+        de consumo de jobs quando completar o job em execução.
+        """
+        try:
+            self.__threads_marked_to_die[tipo_job].add(thread)
+            logger.info(
+                f"[DOWNSCALE] Thread '{thread.name}' marcada para morrer após completar job atual."
+            )
+        except Exception as e:
+            logger.error(f"Erro ao marcar thread para morte: {e}")
+    
+    def _matar_threads_excedentes(self, tipo_job: str):
+        """
+        Marca threads excedentes para morte quando a demanda diminui.
+        
+        Estratégia:
+        1. Calcula threads necessárias baseado em jobs pendentes
+        2. Compara com threads atuais (vivas)
+        3. Se excedentes: marca as últimas (mais novas) para morte graceful
+        4. Threads marcadas finalizam seu job atual e encerram
+        
+        Args:
+            tipo_job: Tipo de job ("conferencia" ou "emissao")
+        """
+        try:
+            # Limpar threads já marcadas que morreram
+            self.__threads_marked_to_die[tipo_job] = {
+                t for t in self.__threads_marked_to_die[tipo_job] if t.is_alive()
+            }
+            
+            # Threads que estão realmente vivas e NÃO estão marcadas para morte
+            threads_vivas_ativas = [
+                t for t in self.threads[tipo_job]
+                if t.is_alive() and t not in self.__threads_marked_to_die[tipo_job]
+            ]
+            
+            threads_necessarias = self.calcular_threads_necessarias(tipo_job)
+            threads_atuais = len(threads_vivas_ativas)
+            
+            if threads_necessarias < threads_atuais:
+                threads_para_matar = threads_atuais - threads_necessarias
+                
+                # Marca as últimas (mais novas) threads para morte
+                # Reversed para matar as mais novas primeiro
+                for thread in reversed(threads_vivas_ativas[-threads_para_matar:]):
+                    self._marcar_thread_para_morte(tipo_job, thread)
+                
+                logger.warning(
+                    f"[DOWNSCALE] {tipo_job}: Marcando {threads_para_matar} thread(s) para morte. "
+                    f"({threads_atuais} → {threads_necessarias} necessárias)"
+                )
+        
+        except Exception as e:
+            logger.error(f"Erro ao matar threads excedentes de {tipo_job}: {e}")
+    
+    def thread_deve_morrer(self, tipo_job: str) -> bool:
+        """
+        Verifica se a thread atual foi marcada para morte.
+        
+        Deve ser chamada pelo worker para saber se deve encerrar após terminar o job atual.
+        
+        Returns:
+            True se a thread deve morrer, False caso contrário
+        """
+        try:
+            thread_atual = threading.current_thread()
+            return thread_atual in self.__threads_marked_to_die.get(tipo_job, set())
+        except Exception as e:
+            logger.error(f"Erro ao verificar se thread deve morrer: {e}")
+            return False
     
     def criar_thread_worker(self, tipo_job: str, nome_worker: str) -> threading.Thread:
         """Cria e retorna uma nova thread para executar o worker."""
@@ -536,13 +624,13 @@ class ThreadPoolManager:
                             logger.error(f"Erro ao criar thread de {tipo_job}: {e}")
                 
                 elif threads_necessarias < threads_atuais:
-                    # REDUZIR: Apenas log informativo (threads daemon morrem com a app)
+                    # DOWNSCALE: Marcar threads excedentes para morte graceful
                     diferenca = threads_atuais - threads_necessarias
                     logger.warning(
-                        f"[REDUZIR] {tipo_job}: {jobs_pendentes} jobs → "
-                        f"{diferenca} thread(s) em excesso (total: {threads_atuais} → {threads_necessarias}). "
-                        f"Threads finalizarão quando jobs terminarem."
+                        f"[DOWNSCALE] {tipo_job}: {jobs_pendentes} jobs → "
+                        f"marcando {diferenca} thread(s) para morrer (total: {threads_atuais} → {threads_necessarias})"
                     )
+                    self._matar_threads_excedentes(tipo_job)
                 
                 else:
                     # Sem mudança
