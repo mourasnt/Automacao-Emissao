@@ -375,3 +375,242 @@ def extrair_dados_dos_cards_mdfe(page: Page) -> List[Dict[str, str]]:
     except Exception as e:
         logger.critical(f"Erro inesperado durante a extração dos MDF-es: {e}")
         return []
+
+
+# ===================================================================
+# GERENCIADOR DE THREAD POOL DINÂMICO
+# ===================================================================
+import threading
+from math import ceil
+from typing import Callable, Optional, Dict, Any
+import redis
+
+
+class ThreadPoolManager:
+    """
+    Gerencia um pool de threads dinâmico que escala baseado na quantidade
+    de jobs pendentes nas filas Redis.
+    
+    Fórmula de escaling: ceil(jobs_pendentes / 50) threads por tipo de job
+    
+    Exemplo:
+      - 322 jobs de conferência → ceil(322/50) = 7 threads
+      - 3 jobs de emissão → ceil(3/50) = 1 thread
+    """
+    
+    def __init__(
+        self,
+        redis_client: redis.Redis,
+        config: Dict[str, Any],
+        ejecutor_function: Callable,
+        usuario: str,
+        senha: str,
+        rebalance_interval: int = 60,
+        max_threads_per_type: int = 10,
+        max_total_threads: int = 20,
+    ):
+        """
+        Args:
+            redis_client: Cliente Redis para leitura de tamanho das filas
+            config: Configuração da aplicação
+            ejecutor_function: Função que executa o fluxo (ex: executar_fluxo)
+            usuario: Usuário RPA
+            senha: Senha RPA
+            rebalance_interval: Intervalo em segundos para verificar e ajustar threads (default: 60s)
+            max_threads_per_type: Limite máximo de threads por tipo (conferência/emissão)
+            max_total_threads: Limite máximo total de threads
+        """
+        self.redis_client = redis_client
+        self.config = config
+        self.ejecutor_function = ejecutor_function
+        self.usuario = usuario
+        self.senha = senha
+        self.rebalance_interval = rebalance_interval
+        self.max_threads_per_type = max_threads_per_type
+        self.max_total_threads = max_total_threads
+        
+        # Dicionário para rastrear threads ativas por tipo
+        # {"conferencia": [t1, t2, ...], "emissao": [t3, t4, ...]}
+        self.threads: Dict[str, list] = {
+            "conferencia": [],
+            "emissao": []
+        }
+        
+        # Lock para operações thread-safe
+        self.lock = threading.Lock()
+        
+        # Flag para controlar se o gerenciador está rodando
+        self.running = True
+    
+    def calcular_threads_necessarias(self, tipo_job: str) -> int:
+        """
+        Calcula quantas threads são necessárias para o tipo de job.
+        
+        Fórmula: ceil(jobs_pendentes / 50)
+        Mínimo: 1 thread se houver jobs, 0 se nenhum job
+        Máximo: max_threads_per_type
+        """
+        fila_key = f"fila:{tipo_job}"
+        try:
+            jobs_pendentes = self.redis_client.llen(fila_key)
+            if jobs_pendentes == 0:
+                return 0
+            
+            threads_necessarias = ceil(jobs_pendentes / 50)
+            threads_necessarias = min(threads_necessarias, self.max_threads_per_type)
+            
+            return threads_necessarias
+        except Exception as e:
+            logger.error(f"Erro ao contar jobs em fila:{tipo_job}: {e}")
+            return 0
+    
+    def criar_thread_worker(self, tipo_job: str, nome_worker: str) -> threading.Thread:
+        """Cria e retorna uma nova thread para executar o worker."""
+        # Importa aqui para evitar imports circulares
+        from workers.fluxo_conferencia import fluxo_conferencia_worker
+        from workers.fluxo_verificar_emissao import fluxo_verificar_emissao_worker
+        
+        worker_map = {
+            "conferencia": fluxo_conferencia_worker,
+            "emissao": fluxo_verificar_emissao_worker,
+        }
+        
+        worker_func = worker_map.get(tipo_job)
+        if not worker_func:
+            logger.error(f"Worker desconhecido: {tipo_job}")
+            return None
+        
+        thread = threading.Thread(
+            target=self.ejecutor_function,
+            args=(nome_worker, worker_func, self.config),
+            daemon=True,
+            name=f"Worker-{tipo_job}-{len(self.threads[tipo_job])+1}"
+        )
+        return thread
+    
+    def rebalancear_threads(self):
+        """
+        Verifica a quantidade de jobs pendentes e ajusta o número de threads.
+        
+        - Se jobs aumentam: cria novas threads
+        - Se jobs diminuem: finaliza threads em excesso graciosamente
+        """
+        with self.lock:
+            for tipo_job in ["conferencia", "emissao"]:
+                threads_atuais = len(self.threads[tipo_job])
+                threads_necessarias = self.calcular_threads_necessarias(tipo_job)
+                
+                # Limpa threads mortas
+                self.threads[tipo_job] = [t for t in self.threads[tipo_job] if t.is_alive()]
+                threads_atuais = len(self.threads[tipo_job])
+                
+                fila_key = f"fila:{tipo_job}"
+                jobs_pendentes = self.redis_client.llen(fila_key)
+                
+                if threads_necessarias > threads_atuais:
+                    # ESCALAR: Criar novas threads
+                    diferenca = threads_necessarias - threads_atuais
+                    logger.info(
+                        f"[ESCALAR] {tipo_job}: {jobs_pendentes} jobs → "
+                        f"criando {diferenca} thread(s) (total: {threads_atuais} → {threads_necessarias})"
+                    )
+                    
+                    for i in range(diferenca):
+                        try:
+                            thread_num = threads_atuais + i + 1
+                            nome_worker = f"{tipo_job}_worker_{thread_num}"
+                            nova_thread = self.criar_thread_worker(tipo_job, nome_worker)
+                            
+                            if nova_thread:
+                                nova_thread.start()
+                                self.threads[tipo_job].append(nova_thread)
+                                logger.success(
+                                    f"Thread '{nova_thread.name}' iniciada. "
+                                    f"Total de {tipo_job}: {len(self.threads[tipo_job])}"
+                                )
+                        except Exception as e:
+                            logger.error(f"Erro ao criar thread de {tipo_job}: {e}")
+                
+                elif threads_necessarias < threads_atuais:
+                    # REDUZIR: Apenas log informativo (threads daemon morrem com a app)
+                    diferenca = threads_atuais - threads_necessarias
+                    logger.warning(
+                        f"[REDUZIR] {tipo_job}: {jobs_pendentes} jobs → "
+                        f"{diferenca} thread(s) em excesso (total: {threads_atuais} → {threads_necessarias}). "
+                        f"Threads finalizarão quando jobs terminarem."
+                    )
+                
+                else:
+                    # Sem mudança
+                    if threads_atuais > 0:
+                        logger.debug(
+                            f"[EQUILIBRIO] {tipo_job}: {jobs_pendentes} jobs → "
+                            f"{threads_atuais} thread(s) ativa(s). Sem mudanças."
+                        )
+    
+    def monitorar_rebalanceamento(self):
+        """
+        Loop que monitora periodicamente e rebalanceia threads.
+        Roda em sua própria thread daemon.
+        """
+        logger.info(
+            f"Monitor de rebalanceamento iniciado. "
+            f"Verificando a cada {self.rebalance_interval}s. "
+            f"Limites: {self.max_threads_per_type} por tipo, {self.max_total_threads} total."
+        )
+        
+        while self.running:
+            try:
+                time.sleep(self.rebalance_interval)
+                
+                if not self.running:
+                    break
+                
+                self.rebalancear_threads()
+                
+            except Exception as e:
+                logger.error(f"Erro no monitor de rebalanceamento: {e}")
+    
+    def iniciar(self):
+        """Inicia o gerenciador de thread pool."""
+        logger.info("Iniciando ThreadPoolManager...")
+        
+        # Cria threads iniciais (mínimo 1 de cada)
+        self.rebalancear_threads()
+        
+        # Inicia thread de monitoramento
+        thread_monitor = threading.Thread(
+            target=self.monitorar_rebalanceamento,
+            daemon=True,
+            name="ThreadPoolMonitor"
+        )
+        thread_monitor.start()
+        logger.success("ThreadPoolManager iniciado com sucesso.")
+    
+    def aguardar_encerramento(self):
+        """
+        Aguarda que todas as threads de workers terminem.
+        Usado no loop principal de main.py.
+        """
+        logger.info("Aguardando encerramento de todas as threads de workers...")
+        
+        while self.running:
+            with self.lock:
+                threads_vivas = sum(
+                    1 for threads_list in self.threads.values()
+                    for thread in threads_list
+                    if thread.is_alive()
+                )
+            
+            if threads_vivas == 0:
+                logger.warning("Todas as threads de workers terminaram!")
+                break
+            
+            logger.debug(f"{threads_vivas} thread(s) ainda em execução...")
+            time.sleep(10)
+    
+    def parar(self):
+        """Para o gerenciador (sinaliza o fim, threads daemon encerram com a app)."""
+        logger.info("Parando ThreadPoolManager...")
+        self.running = False
+        logger.info("ThreadPoolManager parado. Threads daemon encerrarão com a aplicação.")

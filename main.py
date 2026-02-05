@@ -3,23 +3,32 @@ import threading
 import time
 import sys
 import json
-from playwright.sync_api import sync_playwright # <--- CORREÇÃO: 'Browser' removido
+from playwright.sync_api import sync_playwright
 from loguru import logger
 from typing import Dict, Any
 
 # --- Imports da sua aplicação ---
 try:
-    # (Mantendo seu import, assumindo que carregar_config está em helpers)
     from utils.helpers import carregar_config 
 except ImportError:
     logger.critical("Não foi possível encontrar 'utils.helpers.carregar_config'.")
     exit(1)
 
-# --- MUDANÇA: Usando seus novos caminhos 'workers/' ---
+try:
+    from utils.redis_client import get_redis
+except ImportError:
+    logger.critical("Não foi possível encontrar 'utils.redis_client.get_redis'.")
+    exit(1)
+
+try:
+    from utils.fluxo_utils import ThreadPoolManager
+except ImportError:
+    logger.critical("Não foi possível encontrar 'utils.fluxo_utils.ThreadPoolManager'.")
+    exit(1)
+
 from workers.fluxo_conferencia import fluxo_conferencia_worker
 from workers.fluxo_verificar_emissao import fluxo_verificar_emissao_worker
 from fluxos.fluxo_login import fluxo_login
-# --- Fim da MUDANÇA ---
 
 
 # --- Configuração do Logger (Mantida) ---
@@ -111,7 +120,7 @@ def executar_fluxo(nome_fluxo: str, funcao_fluxo, config: Dict[str, Any]): # <--
             logger.error(f"Thread do worker '{nome_fluxo}' foi finalizada.")
 
 # ===================================================================
-# MAIN (Orquestrador de Threads - CORRIGIDO)
+# MAIN (Orquestrador com ThreadPoolManager - NOVO)
 # ===================================================================
 def main():
     config = carregar_config()
@@ -119,60 +128,50 @@ def main():
         logger.critical("Não foi possível carregar o config.json. Encerrando.")
         return
     
-    logger.info("Iniciando Orquestrador de Workers RPA...")
+    logger.info("Iniciando Orquestrador de Workers RPA com ThreadPoolManager...")
     logger.warning("Lembre-se de iniciar o 'poller.py' e o 'writer.py' em terminais separados.")
 
-    # --- CORREÇÃO: O 'with' foi REMOVIDO daqui ---
-    threads = [] 
+    # Inicializa cliente Redis
+    try:
+        redis_host = os.environ.get('REDIS_HOST', 'localhost')
+        redis_port = int(os.environ.get('REDIS_PORT', 6379))
+        redis_db = int(os.environ.get('REDIS_DB', 0))
+        
+        redis_client = get_redis(host=redis_host, port=redis_port, db=redis_db)
+        logger.success(f"Conectado ao Redis em {redis_host}:{redis_port}")
+    except Exception as e:
+        logger.critical(f"Erro ao conectar ao Redis: {e}")
+        return
     
     try:
-        # --- Lançamento dos Workers em Threads ---
-        
-        # --- Worker 1: Conferência ---
-        logger.info("Preparando worker 'conferencia'...")
-        t1 = threading.Thread(
-            target=executar_fluxo, 
-            # --- CORREÇÃO: 'browser' removido dos args ---
-            args=("conferencia", fluxo_conferencia_worker, config),
-            daemon=True 
+        # Cria o gerenciador de thread pool dinâmico
+        pool_manager = ThreadPoolManager(
+            redis_client=redis_client,
+            config=config,
+            ejecutor_function=executar_fluxo,
+            usuario=USUARIO,
+            senha=SENHA,
+            rebalance_interval=60,  # Verifica a cada 60 segundos
+            max_threads_per_type=10,  # Máximo 10 threads por tipo (conferência/emissão)
+            max_total_threads=20,  # Máximo 20 threads no total
         )
-        threads.append(t1)
-
-        # --- Worker 2: Verificar Emissão ---
-        logger.info("Preparando worker 'verificar_emissao'...")
-        t2 = threading.Thread(
-            target=executar_fluxo, 
-            args=("verificar_emissao", fluxo_verificar_emissao_worker, config),
-            daemon=True
-        )
-        threads.append(t2)
         
-        # --- Inicia as threads ---
-        for t in threads:
-            t.start()
-            logger.success(f"Thread {t.name} ({'Conferência' if t is t1 else 'Verificar Emissão'}) iniciada.")
+        # Inicia o gerenciador
+        pool_manager.iniciar()
         
-        # --- Loop de monitoramento ---
-        logger.info("Workers em execução. Pressione Ctrl+C para parar.")
-        while True:
-            alguma_thread_viva = False
-            for t in threads:
-                if t.is_alive():
-                    alguma_thread_viva = True
-                    break
-            
-            if not alguma_thread_viva:
-                logger.critical("Todas as threads dos workers morreram! Encerrando...")
-                break
-                
-            time.sleep(10)
+        # Loop de monitoramento principal
+        logger.info("ThreadPoolManager em execução. Pressione Ctrl+C para parar.")
+        pool_manager.aguardar_encerramento()
 
     except KeyboardInterrupt:
         logger.warning("Execução interrompida pelo usuário (Ctrl+C). Encerrando...")
+        pool_manager.parar()
     
     except Exception as e:
         mensagem_erro = f"Erro fatal no Orquestrador (main): {e}"
         logger.critical(mensagem_erro)
+        if 'pool_manager' in locals():
+            pool_manager.parar()
     
     finally:
         logger.info("Automação finalizada.")
