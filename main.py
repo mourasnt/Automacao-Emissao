@@ -111,11 +111,13 @@ def executar_fluxo(nome_fluxo: str, funcao_fluxo, config: Dict[str, Any]): # <--
             
             funcao_fluxo(page, config) 
             
-            logger.info(f"Worker '{nome_fluxo}' encerrou seu loop (isso não deveria acontecer).")
+            logger.warning(f"Worker '{nome_fluxo}' encerrou seu loop principal. Isso não deveria acontecer - a thread será recriada.")
 
         except Exception as e:
-            mensagem_erro = f"Ocorreu um erro fatal e não tratado no worker '{nome_fluxo}': {e}"
+            import traceback
+            mensagem_erro = f"Erro fatal no worker '{nome_fluxo}': {e}"
             logger.critical(mensagem_erro)
+            logger.critical(f"Stack trace completo:\n{traceback.format_exc()}")
         
         finally:
             # Garante que tudo criado na thread seja fechado nela
@@ -137,14 +139,15 @@ def main():
     logger.info("Iniciando Orquestrador de Workers RPA com ThreadPoolManager...")
     logger.warning("Lembre-se de iniciar o 'poller.py' e o 'writer.py' em terminais separados.")
 
-    # Inicializa cliente Redis
+    # Inicializa cliente Redis usando configurações do config.json
+    redis_cfg = config.get('redis_settings', {})
     try:
-        redis_host = os.environ.get('REDIS_HOST', 'redis')
-        redis_port = int(os.environ.get('REDIS_PORT', 6379))
-        redis_db = int(os.environ.get('REDIS_DB', 0))
+        redis_host = os.environ.get('REDIS_HOST', redis_cfg.get('host', 'redis-emiteai'))
+        redis_port = int(os.environ.get('REDIS_PORT', redis_cfg.get('port', 6379)))
+        redis_db = int(os.environ.get('REDIS_DB', redis_cfg.get('db', 0)))
         
         redis_client = get_redis(host=redis_host, port=redis_port, db=redis_db)
-        logger.success(f"Conectado ao Redis em {redis_host}:{redis_port}")
+        logger.success(f"Conectado ao Redis em {redis_host}:{redis_port} (db={redis_db})")
     except Exception as e:
         logger.critical(f"Erro ao conectar ao Redis: {e}")
         return

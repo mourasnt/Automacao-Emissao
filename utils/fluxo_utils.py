@@ -600,24 +600,76 @@ class ThreadPoolManager:
     
     def aguardar_encerramento(self):
         """
-        Aguarda que todas as threads de workers terminem.
-        Usado no loop principal de main.py.
+        Monitora threads de workers e recria as que morreram inesperadamente.
+        Mantém sempre pelo menos 1 thread por tipo enquanto houver jobs.
         """
-        logger.info("Aguardando encerramento de todas as threads de workers...")
+        logger.info("Monitorando threads de workers...")
         
         while self.running:
             with self.lock:
-                threads_vivas = sum(
-                    1 for threads_list in self.threads.values()
-                    for thread in threads_list
-                    if thread.is_alive()
-                )
+                for tipo_job in ["conferencia", "emissao"]:
+                    # Filtra threads mortas
+                    threads_vivas = [t for t in self.threads[tipo_job] if t.is_alive()]
+                    threads_mortas = len(self.threads[tipo_job]) - len(threads_vivas)
+                    
+                    if threads_mortas > 0:
+                        logger.warning(
+                            f"[RECUPERAR] {tipo_job}: {threads_mortas} thread(s) morreu(morreram)! "
+                            f"Recriando..."
+                        )
+                    
+                    self.threads[tipo_job] = threads_vivas
+                    
+                    # Verifica se precisa recriar threads
+                    threads_atuais = len(threads_vivas)
+                    fila_key = f"fila:{tipo_job}"
+                    
+                    try:
+                        jobs_pendentes = self.redis_client.llen(fila_key)
+                        
+                        # Se tem jobs mas 0 threads, cria pelo menos 1
+                        if threads_atuais == 0 and jobs_pendentes > 0:
+                            logger.info(
+                                f"[RECRIAR] {tipo_job}: 0 threads mas {jobs_pendentes} jobs. "
+                                f"Criando thread de recuperação..."
+                            )
+                            
+                            nome_worker = f"{tipo_job}_worker_recovery_{int(time.time())}"
+                            nova_thread = self.criar_thread_worker(tipo_job, nome_worker)
+                            
+                            if nova_thread:
+                                nova_thread.start()
+                                self.threads[tipo_job].append(nova_thread)
+                                logger.success(f"Thread de recuperação '{nova_thread.name}' iniciada.")
+                                
+                    except Exception as e:
+                        logger.error(f"Erro ao verificar fila {tipo_job}: {e}")
             
-            if threads_vivas == 0:
-                logger.warning("Todas as threads de workers terminaram!")
-                break
+            # Conta total de threads vivas
+            threads_total = sum(
+                1 for threads_list in self.threads.values()
+                for thread in threads_list
+                if thread.is_alive()
+            )
             
-            logger.debug(f"{threads_vivas} thread(s) ainda em execução...")
+            if threads_total == 0:
+                # Verifica se realmente não há jobs antes de sair
+                jobs_conferencia = self.redis_client.llen("fila:conferencia")
+                jobs_emissao = self.redis_client.llen("fila:emissao")
+                
+                if jobs_conferencia == 0 and jobs_emissao == 0:
+                    logger.info(
+                        "Todas as threads terminaram e não há jobs pendentes. "
+                        "Sistema entrando em modo de espera..."
+                    )
+                else:
+                    logger.warning(
+                        f"Threads morreram com jobs pendentes! "
+                        f"Conferência: {jobs_conferencia}, Emissão: {jobs_emissao}. "
+                        f"Aguardando rebalanceamento..."
+                    )
+            
+            logger.debug(f"{threads_total} thread(s) ativa(s)...")
             time.sleep(10)
     
     def parar(self):

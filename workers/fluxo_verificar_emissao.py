@@ -64,6 +64,9 @@ def fluxo_verificar_emissao_worker(page: Page, config: dict):
         return
 
 
+    tentativas_reconexao = 0
+    max_tentativas_reconexao = 3
+
     while True:
         numero_lt = None  # Para usar no finally block
         # 1. ESPERAR POR UM JOB
@@ -84,10 +87,21 @@ def fluxo_verificar_emissao_worker(page: Page, config: dict):
             id = (linha_data.get("ID 3ZX") or "").strip() or f"{numero_lt}-{linha_num}"
             logger.info(f"[Worker Emissão] Job recebido: LT {numero_lt} (Linha {linha_num}). Processando...")
             
+            # Reset contador de reconexão após job bem-sucedido
+            tentativas_reconexao = 0
+            
             # Registrar job no watchdog
             if watchdog:
                 watchdog.registrar_job(numero_lt, worker_id=2, tipo_job="emissao")
 
+        except redis.exceptions.ConnectionError as e:
+            tentativas_reconexao += 1
+            logger.error(f"[Worker Emissão] Erro de conexão Redis ({tentativas_reconexao}/{max_tentativas_reconexao}): {e}")
+            if tentativas_reconexao >= max_tentativas_reconexao:
+                logger.critical("[Worker Emissão] Máximo de tentativas de reconexão atingido. Worker encerrando.")
+                break
+            time.sleep(10)
+            continue
         except Exception as e:
             logger.error(f"[Worker Emissão] Erro ao obter/decodificar job do Redis: {e}")
             time.sleep(5)

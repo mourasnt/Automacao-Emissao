@@ -85,6 +85,9 @@ def fluxo_conferencia_worker(page: Page, config: dict):
     watchdog = config.get('watchdog', None)
     
     # --- LOOP PRINCIPAL DO WORKER ---
+    tentativas_reconexao = 0
+    max_tentativas_reconexao = 3
+    
     while True: 
         try:
             resultado_bruto = r.blpop([q_conferencia], timeout=60) 
@@ -98,7 +101,18 @@ def fluxo_conferencia_worker(page: Page, config: dict):
             
             linha_data = job['data']  # Os dados da linha (dicionário)
             linha_num = job['row']    # O número da linha
+            
+            # Reset contador de reconexão após job bem-sucedido
+            tentativas_reconexao = 0
 
+        except redis.exceptions.ConnectionError as e:
+            tentativas_reconexao += 1
+            logger.error(f"[Worker Conferência] Erro de conexão Redis ({tentativas_reconexao}/{max_tentativas_reconexao}): {e}")
+            if tentativas_reconexao >= max_tentativas_reconexao:
+                logger.critical("[Worker Conferência] Máximo de tentativas de reconexão atingido. Worker encerrando.")
+                break
+            time.sleep(10)
+            continue
         except Exception as e:
             logger.error(f"[Worker Conferência] Erro ao obter/decodificar job do Redis: {e}")
             time.sleep(5)
