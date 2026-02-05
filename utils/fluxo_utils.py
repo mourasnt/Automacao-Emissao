@@ -412,6 +412,7 @@ class ThreadPoolManager:
         rebalance_interval: int = 60,
         max_threads_per_type: int = 10,
         max_total_threads: int = 20,
+        status_display = None,  # Opcional: StatusDisplay para atualizar status em tempo real
     ):
         """
         Args:
@@ -432,6 +433,7 @@ class ThreadPoolManager:
         self.rebalance_interval = rebalance_interval
         self.max_threads_per_type = max_threads_per_type
         self.max_total_threads = max_total_threads
+        self.status_display = status_display  # Display de status em tempo real (opcional)
         
         # Carregar configurações de thread pool do config.json
         thread_pool_cfg = config.get("thread_pool_settings", {})
@@ -558,6 +560,22 @@ class ThreadPoolManager:
             logger.error(f"Erro ao verificar se thread deve morrer: {e}")
             return False
     
+    def _atualizar_status_display(self):
+        """Atualiza o display de status com o número atual de threads por tipo."""
+        if self.status_display:
+            try:
+                with self.lock:
+                    self.status_display.atualizar_threads(
+                        "conferencia",
+                        len([t for t in self.threads["conferencia"] if t.is_alive()])
+                    )
+                    self.status_display.atualizar_threads(
+                        "emissao",
+                        len([t for t in self.threads["emissao"] if t.is_alive()])
+                    )
+            except Exception as e:
+                logger.error(f"Erro ao atualizar status display: {e}")
+    
     def criar_thread_worker(self, tipo_job: str, nome_worker: str) -> threading.Thread:
         """Cria e retorna uma nova thread para executar o worker."""
         # Importa aqui para evitar imports circulares
@@ -641,6 +659,9 @@ class ThreadPoolManager:
                             f"[EQUILIBRIO] {tipo_job}: {jobs_pendentes} jobs → "
                             f"{threads_atuais} thread(s) ativa(s). Sem mudanças."
                         )
+        
+        # Atualizar display de status após rebalanceamento
+        self._atualizar_status_display()
     
     def monitorar_rebalanceamento(self):
         """

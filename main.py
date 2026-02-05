@@ -32,18 +32,33 @@ except ImportError:
     logger.critical("Não foi possível encontrar 'utils.watchdog.JobWatchdog'.")
     exit(1)
 
+try:
+    from utils.status_display import StatusDisplay
+except ImportError:
+    logger.critical("Não foi possível encontrar 'utils.status_display.StatusDisplay'.")
+    exit(1)
+
 from workers.fluxo_conferencia import fluxo_conferencia_worker
 from workers.fluxo_verificar_emissao import fluxo_verificar_emissao_worker
 from fluxos.fluxo_login import fluxo_login
 
 
-# --- Configuração do Logger (Mantida) ---
+# --- Configuração do Logger para APENAS logs importantes ---
 logger.remove()
-# Logs para stdout (Docker)
+
+# Função de filtro para mostrar apenas logs importantes
+def filtro_logs_importantes(record):
+    """Filtra para mostrar apenas WARNING, ERROR, CRITICAL e SUCCESS (que é INFO)."""
+    level_name = record["level"].name
+    # Mostrar apenas estes níveis no console
+    return level_name in ["WARNING", "ERROR", "CRITICAL", "SUCCESS"]
+
+# Logs IMPORTANTES para stdout (Docker)
 logger.add(
     sink=sys.stdout, 
-    format="{time:DD-MM-YYYY HH:mm:ss} | {level:<7} | [RPA Workers] {message}",
-    level="INFO",
+    format="{time:HH:mm:ss} | {level:<8} | {message}",
+    level="DEBUG",  # Captura tudo, mas o filtro seleciona
+    filter=filtro_logs_importantes,
     enqueue=True
 )
 # Logs para arquivo
@@ -111,7 +126,7 @@ def executar_fluxo(nome_fluxo: str, funcao_fluxo, config: Dict[str, Any]): # <--
             
             funcao_fluxo(page, config) 
             
-            logger.warning(f"Worker '{nome_fluxo}' encerrou seu loop principal. Isso não deveria acontecer - a thread será recriada.")
+            logger.info(f"Worker '{nome_fluxo}' encerrou seu loop de consumo. (Pode ser downscaling ou encerramento normal)")
 
         except Exception as e:
             import traceback
@@ -125,7 +140,7 @@ def executar_fluxo(nome_fluxo: str, funcao_fluxo, config: Dict[str, Any]): # <--
                 context.close()
             if browser:
                 browser.close()
-            logger.error(f"Thread do worker '{nome_fluxo}' foi finalizada.")
+            logger.info(f"Thread do worker '{nome_fluxo}' foi finalizada e recursos liberados.")
 
 # ===================================================================
 # MAIN (Orquestrador com ThreadPoolManager - NOVO)
@@ -165,6 +180,14 @@ def main():
         # Adiciona watchdog ao config para os workers acessarem
         config['watchdog'] = watchdog
         
+        # Inicializa display de status em tempo real
+        status_display = StatusDisplay(
+            redis_client=redis_client,
+            update_interval=5  # Atualiza a cada 5 segundos
+        )
+        status_display.iniciar()
+        logger.success("Status display iniciado")
+        
         # Cria o gerenciador de thread pool dinâmico
         pool_manager = ThreadPoolManager(
             redis_client=redis_client,
@@ -175,6 +198,7 @@ def main():
             rebalance_interval=60,  # Verifica a cada 60 segundos
             max_threads_per_type=10,  # Máximo 10 threads por tipo (conferência/emissão)
             max_total_threads=20,  # Máximo 20 threads no total
+            status_display=status_display,  # Passar o status display
         )
         
         # Adiciona pool_manager ao config para os workers acessarem
@@ -189,6 +213,8 @@ def main():
 
     except KeyboardInterrupt:
         logger.warning("Execução interrompida pelo usuário (Ctrl+C). Encerrando...")
+        if 'status_display' in locals():
+            status_display.parar()
         if 'watchdog' in locals():
             watchdog.parar()
         if 'pool_manager' in locals():
@@ -197,6 +223,8 @@ def main():
     except Exception as e:
         mensagem_erro = f"Erro fatal no Orquestrador (main): {e}"
         logger.critical(mensagem_erro)
+        if 'status_display' in locals():
+            status_display.parar()
         if 'watchdog' in locals():
             watchdog.parar()
         if 'pool_manager' in locals():
