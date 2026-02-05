@@ -40,7 +40,9 @@ def enviar_job_update(r_client: redis.Redis, config: dict, row: int, colunas: li
 
 # --- FLUXO REATORADO COMO WORKER ---
 def fluxo_verificar_emissao_worker(page: Page, config: dict):
-    logger.info(f"[Worker Emissão] Iniciando...")
+    import threading
+    worker_name = threading.current_thread().name
+    logger.info(f"[Worker Emissão] Iniciando... (Thread: {worker_name})")
     
     redis_cfg = config.get('redis_settings', {})
     r_host = redis_cfg.get('host')
@@ -63,12 +65,36 @@ def fluxo_verificar_emissao_worker(page: Page, config: dict):
         logger.critical(f"[Worker Emissão] Não foi possível conectar ao Redis: {e}. Worker encerrando.")
         return
 
+    # Função helper para verificar kill signal
+    def verificar_kill_signal(job_id_atual: str) -> bool:
+        """Verifica se este job foi sinalizado para morrer pelo watchdog."""
+        try:
+            kill_signals = r.smembers("watchdog:kill_workers")
+            for signal_json in kill_signals:
+                try:
+                    signal = json.loads(signal_json)
+                    if signal.get("job_id") == job_id_atual:
+                        r.srem("watchdog:kill_workers", signal_json)
+                        logger.warning(f"[Worker Emissão] 💀 Kill signal detectado para job '{job_id_atual}'!")
+                        return True
+                except json.JSONDecodeError:
+                    continue
+        except Exception as e:
+            logger.error(f"[Worker Emissão] Erro ao verificar kill signal: {e}")
+        return False
 
     tentativas_reconexao = 0
     max_tentativas_reconexao = 3
+    job_atual = None  # Track current job for kill signal check
 
     while True:
         numero_lt = None  # Para usar no finally block
+        
+        # Verificar kill signal para o job atual (se houver)
+        if job_atual and verificar_kill_signal(job_atual):
+            logger.critical(f"[Worker Emissão] Encerrando thread por kill signal do Watchdog!")
+            break
+        
         # 1. ESPERAR POR UM JOB
         try:
             resultado_bruto = r.blpop([q_emissao], timeout=60) 
@@ -87,12 +113,15 @@ def fluxo_verificar_emissao_worker(page: Page, config: dict):
             id = (linha_data.get("ID 3ZX") or "").strip() or f"{numero_lt}-{linha_num}"
             logger.info(f"[Worker Emissão] Job recebido: LT {numero_lt} (Linha {linha_num}). Processando...")
             
+            # Atualizar job atual para verificação de kill signal
+            job_atual = numero_lt
+            
             # Reset contador de reconexão após job bem-sucedido
             tentativas_reconexao = 0
             
-            # Registrar job no watchdog
+            # Registrar job no watchdog (usando nome da thread como worker_id)
             if watchdog:
-                watchdog.registrar_job(numero_lt, worker_id=2, tipo_job="emissao")
+                watchdog.registrar_job(numero_lt, worker_id=worker_name, tipo_job="emissao")
 
         except redis.exceptions.ConnectionError as e:
             tentativas_reconexao += 1

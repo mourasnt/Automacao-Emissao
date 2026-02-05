@@ -190,13 +190,19 @@ class JobWatchdog:
         except Exception as e:
             logger.error(f"[Watchdog] Erro ao registrar job travado no Redis: {e}")
         
-        # IMPORTANTE: Não matamos a thread aqui, apenas logamos
-        # O ThreadPoolManager cuida de threads mortas no seu monitor
-        # Mas sinalizamos que esse job não vai completar sozinho
-        logger.warning(
-            f"[Watchdog] Job '{job_id}' será removido do controle após próxima verificação. "
-            f"O worker deve ser substituído pelo ThreadPoolManager."
-        )
+        # ENVIAR KILL SIGNAL para o worker travado
+        try:
+            kill_signal = json.dumps({
+                "worker_id": worker_id,
+                "tipo": tipo,
+                "job_id": job_id,
+                "timestamp": datetime.now().isoformat(),
+                "motivo": "timeout_travamento"
+            })
+            self.redis_client.sadd("watchdog:kill_workers", kill_signal)
+            logger.warning(f"[Watchdog] 💀 Kill signal enviado para worker {worker_id} ({tipo})")
+        except Exception as e:
+            logger.error(f"[Watchdog] Erro ao sinalizar kill do worker: {e}")
         
         # Remover do controle após log (para evitar avisos repetidos)
         self.finalizar_job(job_id)

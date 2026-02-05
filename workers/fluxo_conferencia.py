@@ -58,7 +58,9 @@ def enviar_job_append_erro(r_client: redis.Redis, config: dict, numero_lt: str, 
 
 # --- FLUXO REATORADO COMO WORKER ---
 def fluxo_conferencia_worker(page: Page, config: dict):
-    logger.info("[Worker Conferência] Iniciando...")
+    import threading
+    worker_name = threading.current_thread().name
+    logger.info(f"[Worker Conferência] Iniciando... (Thread: {worker_name})")
     
     URL_CONSULTA = "https://portal.emiteai.com.br/#/ecommerce/shopee/consulta"
     SELETOR_CHAVE_CONSULTA = 'button:has-text("Filtrar")'
@@ -84,11 +86,37 @@ def fluxo_conferencia_worker(page: Page, config: dict):
     # Obter watchdog do config (se disponível)
     watchdog = config.get('watchdog', None)
     
+    # Função helper para verificar kill signal
+    def verificar_kill_signal(job_id_atual: str) -> bool:
+        """Verifica se este job foi sinalizado para morrer pelo watchdog."""
+        try:
+            kill_signals = r.smembers("watchdog:kill_workers")
+            for signal_json in kill_signals:
+                try:
+                    signal = json.loads(signal_json)
+                    # Verifica se o job_id bate
+                    if signal.get("job_id") == job_id_atual:
+                        # Remove o signal após leitura
+                        r.srem("watchdog:kill_workers", signal_json)
+                        logger.warning(f"[Worker Conferência] 💀 Kill signal detectado para job '{job_id_atual}'!")
+                        return True
+                except json.JSONDecodeError:
+                    continue
+        except Exception as e:
+            logger.error(f"[Worker Conferência] Erro ao verificar kill signal: {e}")
+        return False
+    
     # --- LOOP PRINCIPAL DO WORKER ---
     tentativas_reconexao = 0
     max_tentativas_reconexao = 3
+    job_atual = None  # Track current job for kill signal check
     
     while True: 
+        # Verificar kill signal para o job atual (se houver)
+        if job_atual and verificar_kill_signal(job_atual):
+            logger.critical(f"[Worker Conferência] Encerrando thread por kill signal do Watchdog!")
+            break
+        
         try:
             resultado_bruto = r.blpop([q_conferencia], timeout=60) 
             
@@ -136,9 +164,12 @@ def fluxo_conferencia_worker(page: Page, config: dict):
             numero_lt = (linha_data.get("N° Carga") or "").strip()
             id_job = (linha_data.get("ID 3ZX") or "").strip() or f"{numero_lt}-{linha_num}"
             
-            # Registrar job no watchdog
+            # Atualizar job atual para verificação de kill signal
+            job_atual = numero_lt
+            
+            # Registrar job no watchdog (usando nome da thread como worker_id)
             if watchdog:
-                watchdog.registrar_job(numero_lt, worker_id=1, tipo_job="conferencia")
+                watchdog.registrar_job(numero_lt, worker_id=worker_name, tipo_job="conferencia")
             
             try:
                 with TimeoutDetector("Recarregar página", max_seconds=20, job_id=numero_lt):
@@ -181,12 +212,16 @@ def fluxo_conferencia_worker(page: Page, config: dict):
                 continue
 
             # --- LÓGICA PRINCIPAL (CAMINHO FELIZ) ---
-            logger.info(f"[Worker Conferência] Iniciando RPA para LT {numero_lt} (Linha {linha_num}).")
+            logger.info(f"[Worker Conferência] ▶️  Iniciando RPA para LT {numero_lt} (Linha {linha_num}).")
             
             # Suas funções de RPA
-            filtro_cargas(page, carga.numero_lt) # Adicionado de volta
+            logger.info(f"[Worker Conferência] [LT {numero_lt}] 📋 Passo 1/3: Aplicando filtro...")
+            filtro_cargas(page, carga.numero_lt)
+            logger.info(f"[Worker Conferência] [LT {numero_lt}] ✅ Filtro aplicado!")
+            
+            logger.info(f"[Worker Conferência] [LT {numero_lt}] 🔍 Passo 2/3: Obtendo status...")
             status_emiteai = obter_status_lt(page, carga.numero_lt)
-            logger.info(f"[Worker Conferência] LT {numero_lt}: Status no EmiteAí: {status_emiteai}")
+            logger.info(f"[Worker Conferência] [LT {numero_lt}] ✅ Status obtido: {status_emiteai}")
             
             # Prepara o pacote de resultados base
             colunas_update = ["Data Conferência", "Status EmiteAI (coletado)"]
@@ -194,7 +229,9 @@ def fluxo_conferencia_worker(page: Page, config: dict):
 
             if status_emiteai == "Aguardando Conferência":
                 # Chama a sub-tarefa de RPA
+                logger.info(f"[Worker Conferência] [LT {numero_lt}] 📝 Passo 3/3: Executando conferência...")
                 resultado_rpa = conferir_lt(page, carga)
+                logger.info(f"[Worker Conferência] [LT {numero_lt}] ✅ Conferência finalizada: {resultado_rpa.get('status')}")
                 
                 # --- Interpreta o resultado do RPA ---
                 if resultado_rpa["status"] == "sucesso":

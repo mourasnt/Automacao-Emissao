@@ -230,22 +230,26 @@ def analisar_status_emissao(page: Page, numero_lt: str) -> dict | None:
 
 def obter_status_lt(page: Page, numero_lt: str) -> str:
     """Procura a LT na tabela e retorna o Status."""
+    logger.debug(f"[obter_status_lt] Iniciando busca do status da LT {numero_lt}...")
     try:
-        time.sleep(5000)
+        time.sleep(5)  # CORRIGIDO: Era 5000 segundos (83 min!) - Agora 2 segundos
+        logger.debug(f"[obter_status_lt] Buscando linha na tabela para LT {numero_lt}...")
         linha_alvo = page.locator("table tbody tr", has_text=numero_lt).first
         
         if linha_alvo.count() == 0:
-            logger.info(f"LT {numero_lt} não encontrada na tabela.")
+            logger.info(f"[obter_status_lt] LT {numero_lt} não encontrada na tabela.")
             return "não encontrado"
 
+        logger.debug(f"[obter_status_lt] Linha encontrada, extraindo status...")
         status = linha_alvo.locator("td").nth(3).inner_text().strip()
+        logger.debug(f"[obter_status_lt] Status extraído para LT {numero_lt}: '{status}'")
         return status
 
     except TimeoutError:
-        logger.warning(f"Timeout ao localizar a linha da LT {numero_lt} na tabela.")
+        logger.warning(f"[obter_status_lt] Timeout ao localizar a linha da LT {numero_lt} na tabela.")
         return "desconhecido"
     except Exception as e:
-        logger.error(f"Erro ao extrair Status da LT {numero_lt}: {e}")
+        logger.error(f"[obter_status_lt] Erro ao extrair Status da LT {numero_lt}: {e}")
         return "desconhecido"
 
 
@@ -601,11 +605,14 @@ class ThreadPoolManager:
     def aguardar_encerramento(self):
         """
         Monitora threads de workers e recria as que morreram inesperadamente.
-        Mantém sempre pelo menos 1 thread por tipo enquanto houver jobs.
+        Também verifica kill signals do Watchdog e cria threads de reposição.
         """
         logger.info("Monitorando threads de workers...")
         
         while self.running:
+            # Verificar kill signals pendentes e criar threads de reposição
+            self._processar_kill_signals()
+            
             with self.lock:
                 for tipo_job in ["conferencia", "emissao"]:
                     # Filtra threads mortas
@@ -617,10 +624,21 @@ class ThreadPoolManager:
                             f"[RECUPERAR] {tipo_job}: {threads_mortas} thread(s) morreu(morreram)! "
                             f"Recriando..."
                         )
+                        # Recriar threads mortas imediatamente
+                        for _ in range(threads_mortas):
+                            try:
+                                nome_worker = f"{tipo_job}_worker_recovery_{int(time.time())}"
+                                nova_thread = self.criar_thread_worker(tipo_job, nome_worker)
+                                if nova_thread:
+                                    nova_thread.start()
+                                    threads_vivas.append(nova_thread)
+                                    logger.success(f"Thread de recuperação '{nova_thread.name}' iniciada.")
+                            except Exception as e:
+                                logger.error(f"Erro ao recriar thread de {tipo_job}: {e}")
                     
                     self.threads[tipo_job] = threads_vivas
                     
-                    # Verifica se precisa recriar threads
+                    # Verifica se precisa criar mais threads por falta
                     threads_atuais = len(threads_vivas)
                     fila_key = f"fila:{tipo_job}"
                     
@@ -671,6 +689,56 @@ class ThreadPoolManager:
             
             logger.debug(f"{threads_total} thread(s) ativa(s)...")
             time.sleep(10)
+    
+    def _processar_kill_signals(self):
+        """
+        Verifica kill signals do Watchdog e cria threads de reposição.
+        
+        Quando o Watchdog detecta um job travado, ele envia um kill signal.
+        Esta função lê esses sinais e cria novas threads para substituir as travadas.
+        """
+        import json
+        try:
+            kill_signals = self.redis_client.smembers("watchdog:kill_workers")
+            
+            if not kill_signals:
+                return
+            
+            for signal_json in kill_signals:
+                try:
+                    signal = json.loads(signal_json)
+                    tipo_job = signal.get("tipo", "conferencia")
+                    job_id = signal.get("job_id", "desconhecido")
+                    
+                    logger.warning(
+                        f"[KILL SIGNAL] Detectado travamento do job '{job_id}' ({tipo_job}). "
+                        f"Criando thread de substituição..."
+                    )
+                    
+                    # Criar uma nova thread imediatamente (não espera a antiga morrer)
+                    with self.lock:
+                        nome_worker = f"{tipo_job}_worker_replace_{int(time.time())}"
+                        nova_thread = self.criar_thread_worker(tipo_job, nome_worker)
+                        
+                        if nova_thread:
+                            nova_thread.start()
+                            self.threads[tipo_job].append(nova_thread)
+                            logger.success(
+                                f"Thread de substituição '{nova_thread.name}' iniciada para {tipo_job}. "
+                                f"Thread travada será descartada quando morrer."
+                            )
+                    
+                    # Remove o kill signal após processamento
+                    self.redis_client.srem("watchdog:kill_workers", signal_json)
+                    
+                except json.JSONDecodeError:
+                    # Remove signals inválidos
+                    self.redis_client.srem("watchdog:kill_workers", signal_json)
+                except Exception as e:
+                    logger.error(f"Erro ao processar kill signal: {e}")
+                    
+        except Exception as e:
+            logger.error(f"Erro ao verificar kill signals: {e}")
     
     def parar(self):
         """Para o gerenciador (sinaliza o fim, threads daemon encerram com a app)."""

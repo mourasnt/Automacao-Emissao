@@ -15,21 +15,27 @@ PAGE_RELOAD_TIMEOUT = config.get("timeout_settings", {}).get("page_reload_ms", 4
 
 
 def filtro_cargas(page: Page, numero_lt: str):
+    logger.debug(f"[filtro_cargas] Iniciando filtro para LT {numero_lt}...")
     try:
         # --- 1. Seletores ---
+        logger.debug(f"[filtro_cargas] Localizando seletores...")
         filtrar_button = page.get_by_role("button", name="Filtrar")
         data_inicial_input = page.locator("div").filter(has_text=re.compile(r"^Data Inicial$")).get_by_role("textbox")
         arquivo_input = page.locator("div").filter(has_text=re.compile(r"^Nome do arquivo$")).get_by_role("textbox")
 
         # --- 2. GARANTIR QUE A PÁGINA ESTÁ PRONTA ---
+        logger.debug(f"[filtro_cargas] Aguardando botão Filtrar ficar visível...")
         filtrar_button.wait_for(state="visible", timeout=15000)
 
         # --- 3. Abrir o painel de filtros (se necessário) ---
+        logger.debug(f"[filtro_cargas] Verificando se painel de filtros está aberto...")
         if not data_inicial_input.is_visible():
+            logger.debug(f"[filtro_cargas] Abrindo painel de filtros...")
             filtrar_button.click()
             expect(data_inicial_input).to_be_visible(timeout=5000)
 
         # --- 4. Preenchimento do formulário ---
+        logger.debug(f"[filtro_cargas] Preenchendo formulário de filtro...")
         data_final = datetime.datetime.now()
         data_inicial = data_final - datetime.timedelta(days=30)
         
@@ -40,15 +46,21 @@ def filtro_cargas(page: Page, numero_lt: str):
         arquivo_input.fill(numero_lt)
 
         # --- 5. Executar a pesquisa ---
+        logger.debug(f"[filtro_cargas] Clicando em Pesquisar...")
         pesquisar_btn = page.get_by_role("button", name="Pesquisar")
         pesquisar_btn.click()
 
+        logger.debug(f"[filtro_cargas] Aguardando networkidle (máx 20s)...")
         page.wait_for_load_state("networkidle", timeout=20000)
+        logger.debug(f"[filtro_cargas] Pesquisa concluída!")
 
         # --- 6. Fechar o filtro ---
         if data_inicial_input.is_visible():
+            logger.debug(f"[filtro_cargas] Fechando painel de filtros...")
             filtrar_button.click()
             expect(data_inicial_input).to_be_hidden(timeout=5000)
+        
+        logger.debug(f"[filtro_cargas] Filtro para LT {numero_lt} finalizado com sucesso!")
 
     except TimeoutError as e:
         detalhe_erro = str(e).split('\n')[0]
