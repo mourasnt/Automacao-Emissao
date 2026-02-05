@@ -1,6 +1,7 @@
 """
-Sistema de display de status em tempo real com atualização na mesma linha.
-Apenas logs IMPORTANTES são mostrados, com um resumo sempre visível no rodapé.
+Sistema de display de status em tempo real.
+Status é atualizado a cada 5 segundos em uma linha única (funciona em Docker).
+Apenas logs IMPORTANTES são mostrados.
 """
 import threading
 import time
@@ -12,16 +13,11 @@ import sys
 
 class StatusDisplay:
     """
-    Gerencia display de status em tempo real.
+    Gerencia display de status em tempo real na mesma linha.
     
-    Status fica FIXO no rodapé da tela, sempre atualizado.
-    Apenas logs IMPORTANTES são mostrados acima dele.
+    Usa carriage return (\r) para atualizar a mesma linha.
+    Funciona em qualquer ambiente, incluindo Docker/Portainer.
     """
-    
-    # ANSI codes para manipular cursor
-    CLEAR_LINE = "\033[2K"
-    MOVE_UP_4 = "\033[4A"
-    CARRIAGE_RETURN = "\r"
     
     def __init__(self, redis_client: redis.Redis, update_interval: int = 5):
         """
@@ -44,53 +40,48 @@ class StatusDisplay:
             "conferencia": 0,
             "emissao": 0
         }
-        
-        # Controle de primeira exibição
-        self.primeira_exibicao = True
     
     def atualizar_threads(self, tipo_job: str, quantidade: int):
         """Atualiza quantidade de threads ativas de um tipo."""
         with self.lock:
             self.threads_status[tipo_job] = quantidade
     
-    def _formatar_status(self) -> str:
-        """Formata o box de status."""
+    def _formatar_status_linha(self) -> str:
+        """Formata o status em UMA ÚNICA linha (para atualizar com \r)."""
         with self.lock:
             conf_threads = self.threads_status.get("conferencia", 0)
             emis_threads = self.threads_status.get("emissao", 0)
             conf_jobs = self.jobs_pending.get("conferencia", 0)
             emis_jobs = self.jobs_pending.get("emissao", 0)
         
-        # Cores e formatação
+        # Uma linha única, comprimento fixo, fácil de sobrescrever
+        linha = (
+            f"[STATUS] Conf: {conf_threads}🧵 ({conf_jobs:3d}📦) | "
+            f"Emis: {emis_threads}🧵 ({emis_jobs:3d}📦)                    "
+        )
+        return linha
+    
+    def _formatar_status_caixa(self) -> str:
+        """Formata o status em forma de caixa (para exibição estática)."""
+        with self.lock:
+            conf_threads = self.threads_status.get("conferencia", 0)
+            emis_threads = self.threads_status.get("emissao", 0)
+            conf_jobs = self.jobs_pending.get("conferencia", 0)
+            emis_jobs = self.jobs_pending.get("emissao", 0)
+        
         status_box = (
             f"\n"
             f"╔════════════════════════════════════════════════════════════╗\n"
             f"║ 👷 Conferência: {conf_threads} thread{'s' if conf_threads != 1 else ' ':<7}  │  👷 Emissão: {emis_threads} thread{'s' if emis_threads != 1 else ' ':<8}\n"
             f"║ 📦 Pendentes: {conf_jobs:5d} (conf)    │  {emis_jobs:5d} (emis)\n"
-            f"╚════════════════════════════════════════════════════════════╝"
+            f"╚════════════════════════════════════════════════════════════╝\n"
         )
         return status_box
     
-    def _limpar_status_anterior(self):
-        """Limpa o status anterior (4 linhas) do console."""
-        try:
-            # Move cursor 4 linhas para cima
-            sys.stdout.write(self.MOVE_UP_4)
-            # Limpa cada uma das 4 linhas
-            for _ in range(4):
-                sys.stdout.write(self.CLEAR_LINE)
-                sys.stdout.write("\n")
-            # Move de volta ao início do status
-            sys.stdout.write(self.MOVE_UP_4)
-            sys.stdout.flush()
-        except Exception:
-            # Se falhar (não suporta ANSI), apenas não faz nada
-            pass
-    
     def _monitorar_status(self):
         """
-        Loop que atualiza o status periodicamente.
-        Contém jobs pendentes e exibe resumo fixo no rodapé.
+        Loop que atualiza o status periodicamente na mesma linha.
+        Para Docker/Portainer, usa \r (carriage return) ao invés de ANSI codes.
         """
         while self.running:
             try:
@@ -102,14 +93,11 @@ class StatusDisplay:
                     except Exception as e:
                         logger.error(f"Erro ao contar jobs: {e}")
                 
-                # Exibe status
-                if not self.primeira_exibicao:
-                    self._limpar_status_anterior()
-                else:
-                    self.primeira_exibicao = False
-                
-                sys.stdout.write(self._formatar_status())
-                sys.stdout.flush()
+                # Escreve status na mesma linha usando \r (carriage return)
+                # Isso funciona em qualquer terminal, incluindo Docker
+                linha_status = self._formatar_status_linha()
+                sys.stderr.write(f"\r{linha_status}")
+                sys.stderr.flush()
                 
                 time.sleep(self.update_interval)
                 
@@ -119,11 +107,12 @@ class StatusDisplay:
     def iniciar(self):
         """Inicia o display de status em background."""
         self.running = True
-        # Exibe status inicial
-        sys.stdout.write(self._formatar_status())
-        sys.stdout.flush()
         
-        # Inicia thread de atualização
+        # Exibe status inicial em forma de caixa
+        sys.stderr.write(self._formatar_status_caixa())
+        sys.stderr.flush()
+        
+        # Inicia thread de atualização (usa stderr para não interferir com stdout)
         self.monitor_thread = threading.Thread(
             target=self._monitorar_status,
             daemon=True,
@@ -137,6 +126,9 @@ class StatusDisplay:
         self.running = False
         if self.monitor_thread:
             self.monitor_thread.join(timeout=2)
+        # Limpa a linha de status final
+        sys.stderr.write("\r" + " " * 100 + "\r")
+        sys.stderr.flush()
         logger.info("Status display parado")
     
     def get_resumo_json(self) -> Dict[str, Any]:
@@ -148,4 +140,5 @@ class StatusDisplay:
                 "total_threads": sum(self.threads_status.values()),
                 "total_jobs": sum(self.jobs_pending.values())
             }
+
 
