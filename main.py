@@ -26,6 +26,12 @@ except ImportError:
     logger.critical("Não foi possível encontrar 'utils.fluxo_utils.ThreadPoolManager'.")
     exit(1)
 
+try:
+    from utils.watchdog import JobWatchdog
+except ImportError:
+    logger.critical("Não foi possível encontrar 'utils.watchdog.JobWatchdog'.")
+    exit(1)
+
 from workers.fluxo_conferencia import fluxo_conferencia_worker
 from workers.fluxo_verificar_emissao import fluxo_verificar_emissao_worker
 from fluxos.fluxo_login import fluxo_login
@@ -144,6 +150,18 @@ def main():
         return
     
     try:
+        # Inicializa o Watchdog para detectar travamentos
+        watchdog = JobWatchdog(
+            redis_client=redis_client,
+            max_job_duration=300,      # 5 minutos máximo por job
+            check_interval=30          # Verificar a cada 30 segundos
+        )
+        watchdog.iniciar()
+        logger.success("Watchdog de travamentos iniciado")
+        
+        # Adiciona watchdog ao config para os workers acessarem
+        config['watchdog'] = watchdog
+        
         # Cria o gerenciador de thread pool dinâmico
         pool_manager = ThreadPoolManager(
             redis_client=redis_client,
@@ -165,11 +183,16 @@ def main():
 
     except KeyboardInterrupt:
         logger.warning("Execução interrompida pelo usuário (Ctrl+C). Encerrando...")
-        pool_manager.parar()
+        if 'watchdog' in locals():
+            watchdog.parar()
+        if 'pool_manager' in locals():
+            pool_manager.parar()
     
     except Exception as e:
         mensagem_erro = f"Erro fatal no Orquestrador (main): {e}"
         logger.critical(mensagem_erro)
+        if 'watchdog' in locals():
+            watchdog.parar()
         if 'pool_manager' in locals():
             pool_manager.parar()
     

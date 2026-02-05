@@ -8,7 +8,8 @@ from playwright.sync_api import Page
 from dados.dataclass import Carga
 from fluxos.conferir import conferir_lt
 from utils.fluxo_utils import obter_status_lt, garantir_pagina_consulta
-from utils.filtros import filtro_cargas 
+from utils.filtros import filtro_cargas
+from utils.watchdog import TimeoutDetector 
 
 # Carrega configurações de timeout
 config_path = os.path.join(os.path.dirname(__file__), "..", "utils", "config.json")
@@ -80,6 +81,9 @@ def fluxo_conferencia_worker(page: Page, config: dict):
         logger.critical(f"[Worker Conferência] Não foi possível conectar ao Redis: {e}. Worker encerrando.")
         return
 
+    # Obter watchdog do config (se disponível)
+    watchdog = config.get('watchdog', None)
+    
     # --- LOOP PRINCIPAL DO WORKER ---
     while True: 
         pagina_esta_ok = garantir_pagina_consulta(
@@ -112,13 +116,22 @@ def fluxo_conferencia_worker(page: Page, config: dict):
 
         # 3. PROCESSAR O JOB
         try:
+            numero_lt = (linha_data.get("N° Carga") or "").strip()
+            id_job = (linha_data.get("ID 3ZX") or "").strip() or f"{numero_lt}-{linha_num}"
+            
+            # Registrar job no watchdog
+            if watchdog:
+                watchdog.registrar_job(numero_lt, worker_id=1, tipo_job="conferencia")
+            
             try:
-                page.reload(wait_until="domcontentloaded", timeout=PAGE_RELOAD_TIMEOUT)
+                with TimeoutDetector("Recarregar página", max_seconds=20, job_id=numero_lt):
+                    page.reload(wait_until="domcontentloaded", timeout=PAGE_RELOAD_TIMEOUT)
             except Exception as reload_err:
                 logger.error(f"[Worker Conferência] Falha ao recarregar página: {reload_err}")
                 # Tenta navegar para a página conhecida
                 try:
-                    page.goto(URL_CONSULTA, timeout=PAGE_RELOAD_TIMEOUT)
+                    with TimeoutDetector("Navegar para consulta", max_seconds=20, job_id=numero_lt):
+                        page.goto(URL_CONSULTA, timeout=PAGE_RELOAD_TIMEOUT)
                 except Exception as goto_err:
                     logger.error(f"[Worker Conferência] Falha ao navegar para consulta: {goto_err}")
                     continue
@@ -211,5 +224,9 @@ def fluxo_conferencia_worker(page: Page, config: dict):
                     r.srem(s_controle, id)
                 except Exception as e_redis:
                     logger.error(f"[Worker Conferência] [LT {numero_lt}] FALHA CRÍTICA ao remover cadeado do '{s_controle}': {e_redis}")
+            
+            # Finalizar job no watchdog
+            if watchdog and numero_lt:
+                watchdog.finalizar_job(numero_lt)
 
     logger.info("[Worker Conferência] Encerrado.")

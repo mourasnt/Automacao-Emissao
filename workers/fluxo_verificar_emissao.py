@@ -11,6 +11,7 @@ from utils.filtros import filtro_cards
 from fluxos.revisar import revisar_lt
 from fluxos.preencher_cte import preencher_cte
 from fluxos.preencher_mdfe import preencher_mdfe
+from utils.watchdog import TimeoutDetector
 
 # Carrega configurações de timeout
 config_path = os.path.join(os.path.dirname(__file__), "..", "utils", "config.json")
@@ -51,6 +52,9 @@ def fluxo_verificar_emissao_worker(page: Page, config: dict):
         logger.critical(f"[Worker Emissão] Config 'control_set' não encontrada. O Worker não pode limpar o cadeado!")
         return
     
+    # Extrair watchdog da configuração
+    watchdog = config.get('watchdog', None)
+    
     try:
         from utils.redis_client import get_redis
         r = get_redis(host=r_host, port=r_port, db=r_db)
@@ -61,6 +65,7 @@ def fluxo_verificar_emissao_worker(page: Page, config: dict):
 
 
     while True:
+        numero_lt = None  # Para usar no finally block
         # 1. ESPERAR POR UM JOB
         try:
             resultado_bruto = r.blpop([q_emissao], timeout=60) 
@@ -78,6 +83,10 @@ def fluxo_verificar_emissao_worker(page: Page, config: dict):
             numero_lt = (linha_data.get("N° Carga") or "").strip()
             id = (linha_data.get("ID 3ZX") or "").strip() or f"{numero_lt}-{linha_num}"
             logger.info(f"[Worker Emissão] Job recebido: LT {numero_lt} (Linha {linha_num}). Processando...")
+            
+            # Registrar job no watchdog
+            if watchdog:
+                watchdog.registrar_job(numero_lt, worker_id=2, tipo_job="emissao")
 
         except Exception as e:
             logger.error(f"[Worker Emissão] Erro ao obter/decodificar job do Redis: {e}")
@@ -115,11 +124,15 @@ def fluxo_verificar_emissao_worker(page: Page, config: dict):
             
             logger.info(f"[Worker Emissão] Iniciando RPA para LT: {numero_lt} (Linha {linha_num})")
 
-            goto_cards(page)
-            filtro_cards(page, numero_lt)
+            with TimeoutDetector("Navegar para Cards", max_seconds=20, job_id=numero_lt):
+                goto_cards(page)
+            
+            with TimeoutDetector("Filtrar Cards", max_seconds=15, job_id=numero_lt):
+                filtro_cards(page, numero_lt)
             
             # 'analisar_status_emissao' é uma função de RPA
-            analise = analisar_status_emissao(page, numero_lt)
+            with TimeoutDetector("Analisar Status de Emissão", max_seconds=20, job_id=numero_lt):
+                analise = analisar_status_emissao(page, numero_lt)
             if not analise:
                 logger.error(f"[Worker Emissão] Não foi possível encontrar o card ou analisar o status para a LT {numero_lt}.")
                 continue # Pula para o próximo job
@@ -140,7 +153,8 @@ def fluxo_verificar_emissao_worker(page: Page, config: dict):
                 
                 if tipo_card == "cte":
                     logger.info(f"[Worker Emissão] [LT {numero_lt}] Status 'ag._revisão' (CTE). Executando RPA de revisão...")
-                    resultado_rpa = revisar_lt(page, numero_lt) # Chama "operário"
+                    with TimeoutDetector("Revisar LT", max_seconds=30, job_id=numero_lt):
+                        resultado_rpa = revisar_lt(page, numero_lt) # Chama "operário"
                     
                     if resultado_rpa["status"] == "sucesso":
                         logger.success(f"[Worker Emissão] [LT {numero_lt}] Revisão concluída. Job será re-processado pelo Poller.")
@@ -167,7 +181,8 @@ def fluxo_verificar_emissao_worker(page: Page, config: dict):
                 if not cte_preenchido:
                     if analise["status_cte"] == "autorizado":
                         logger.info(f"[Worker Emissão] [LT {numero_lt}] Status CT-e 'Autorizado'. Extraindo dados...")
-                        resultado_cte = preencher_cte(page, card, numero_lt)
+                        with TimeoutDetector("Preencher CT-e", max_seconds=30, job_id=numero_lt):
+                            resultado_cte = preencher_cte(page, card, numero_lt)
                         
                         if resultado_cte["status"] == "sucesso":
                             cte_preenchido = True
@@ -195,7 +210,8 @@ def fluxo_verificar_emissao_worker(page: Page, config: dict):
                 if not mdfe_preenchido:
                     if analise["status_mdfe"] == "autorizado":
                         logger.info(f"[Worker Emissão] [LT {numero_lt}] Status MDF-e 'Autorizado'. Extraindo dados...")
-                        resultado_mdfe = preencher_mdfe(page, card, numero_lt)
+                        with TimeoutDetector("Preencher MDF-e", max_seconds=30, job_id=numero_lt):
+                            resultado_mdfe = preencher_mdfe(page, card, numero_lt)
                         
                         if resultado_mdfe["status"] == "sucesso":
                             mdfe_preenchido = True # Atualiza o estado local
@@ -245,6 +261,9 @@ def fluxo_verificar_emissao_worker(page: Page, config: dict):
                     logger.error(f"[Worker Emissão] Falha crítica ao navegar: {goto_err}")
             continue
         finally:
+            # Finalizar job no watchdog
+            if watchdog and numero_lt:
+                watchdog.finalizar_job(numero_lt)
             try:
                 logger.debug(f"[Worker Emissão] [LT {numero_lt}] Processamento finalizado. Removendo cadeado do '{s_controle}'.")
                 r.srem(s_controle, id)
