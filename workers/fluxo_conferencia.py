@@ -86,16 +86,6 @@ def fluxo_conferencia_worker(page: Page, config: dict):
     
     # --- LOOP PRINCIPAL DO WORKER ---
     while True: 
-        pagina_esta_ok = garantir_pagina_consulta(
-            page=page,
-            url_alvo=URL_CONSULTA,
-            seletor_chave=SELETOR_CHAVE_CONSULTA
-        )
-        if not pagina_esta_ok:
-            logger.critical("[Worker Conferência] A página de consulta está inacessível. Pausando por 5 minutos.")
-            time.sleep(300)
-            continue
-            
         try:
             resultado_bruto = r.blpop([q_conferencia], timeout=60) 
             
@@ -116,6 +106,19 @@ def fluxo_conferencia_worker(page: Page, config: dict):
 
         # 3. PROCESSAR O JOB
         try:
+            # Validar página ANTES de processar este job
+            pagina_esta_ok = garantir_pagina_consulta(
+                page=page,
+                url_alvo=URL_CONSULTA,
+                seletor_chave=SELETOR_CHAVE_CONSULTA
+            )
+            if not pagina_esta_ok:
+                logger.warning("[Worker Conferência] A página de consulta está inacessível. Re-adicionando job à fila.")
+                # Re-adiciona o job à fila para tentar depois
+                r.rpush(q_conferencia, job_json)
+                time.sleep(5)
+                continue
+            
             numero_lt = (linha_data.get("N° Carga") or "").strip()
             id_job = (linha_data.get("ID 3ZX") or "").strip() or f"{numero_lt}-{linha_num}"
             

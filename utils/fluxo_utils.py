@@ -575,8 +575,19 @@ class ThreadPoolManager:
         """Inicia o gerenciador de thread pool."""
         logger.info("Iniciando ThreadPoolManager...")
         
-        # Cria threads iniciais (mínimo 1 de cada)
-        self.rebalancear_threads()
+        # Cria threads iniciais (SEMPRE 1 de cada tipo, independente de jobs)
+        with self.lock:
+            for tipo_job in ["conferencia", "emissao"]:
+                try:
+                    nome_worker = f"{tipo_job}_worker_1"
+                    nova_thread = self.criar_thread_worker(tipo_job, nome_worker)
+                    
+                    if nova_thread:
+                        nova_thread.start()
+                        self.threads[tipo_job].append(nova_thread)
+                        logger.success(f"Thread inicial '{nova_thread.name}' iniciada.")
+                except Exception as e:
+                    logger.error(f"Erro ao criar thread inicial de {tipo_job}: {e}")
         
         # Inicia thread de monitoramento
         thread_monitor = threading.Thread(
